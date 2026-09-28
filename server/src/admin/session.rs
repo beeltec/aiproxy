@@ -110,7 +110,11 @@ pub async fn delete_by_cookie(db: &SqlitePool, jar: &CookieJar) -> Result<(), sq
 }
 
 /// Deletes all sessions of an admin, optionally except one.
-pub async fn delete_all_of(db: &SqlitePool, admin_id: i64, except: Option<i64>) -> Result<(), sqlx::Error> {
+pub async fn delete_all_of(
+    db: impl sqlx::SqliteExecutor<'_>,
+    admin_id: i64,
+    except: Option<i64>,
+) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM sessions WHERE admin_id = ? AND id IS NOT ?")
         .bind(admin_id)
         .bind(except)

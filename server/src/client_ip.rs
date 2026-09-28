@@ -61,7 +61,14 @@ where
             .get::<ConnectInfo<SocketAddr>>()
             .map(|info| info.0.ip())
             .unwrap_or(IpAddr::from([0, 0, 0, 0]));
-        let forwarded = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-        Ok(Self(TrustedProxies::from_ref(state).client_ip(peer, forwarded)))
+        // A proxy can add its own header line, so all lines count, in order.
+        let forwarded = parts
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(Self(TrustedProxies::from_ref(state).client_ip(peer, Some(&forwarded))))
     }
 }

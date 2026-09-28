@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::admins::validate_password;
+use super::admins::{set_password, validate_password};
 use super::session::{self, AdminSession};
 use crate::db::now;
 use crate::error::{ApiError, ApiResult, ErrorBody};
@@ -49,24 +49,33 @@ async fn change_password(
     Json(req): Json<ChangePassword>,
 ) -> ApiResult<StatusCode> {
     validate_password(&req.new_password)?;
+    let wrong_password = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "wrong_password",
+            "The current password is not correct.",
+        )
+    };
     let hash: String = sqlx::query_scalar("SELECT password_hash FROM admins WHERE id = ?")
         .bind(current.admin_id)
         .fetch_one(&state.db)
         .await?;
-    if !state.hasher.verify(Some(hash), req.current_password).await? {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "wrong_password",
-            "The current password is not correct.",
-        ));
+    if !state.hasher.verify(Some(hash.clone()), req.current_password).await? {
+        return Err(wrong_password());
     }
     let new_hash = state.hasher.hash(req.new_password).await?;
-    sqlx::query("UPDATE admins SET password_hash = ? WHERE id = ?")
-        .bind(new_hash)
-        .bind(current.admin_id)
-        .execute(&state.db)
-        .await?;
-    session::delete_all_of(&state.db, current.admin_id, Some(current.session_id)).await?;
+    // Fails when the password changed in the meantime (for example a reset by another admin).
+    if !set_password(
+        &state.db,
+        current.admin_id,
+        &new_hash,
+        Some(&hash),
+        Some(current.session_id),
+    )
+    .await?
+    {
+        return Err(wrong_password());
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

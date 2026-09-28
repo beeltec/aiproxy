@@ -33,6 +33,8 @@ function SetupPage() {
 		mutationFn: (body: z.infer<typeof schema>) =>
 			call(api.POST("/setup", { body: { ...body, token: body.token.trim() } })),
 		onSuccess: async (me) => {
+			// Drop data of an earlier session, which may belong to another admin.
+			queryClient.clear();
 			queryClient.setQueryData(meQuery.queryKey, me);
 			queryClient.setQueryData(setupQuery.queryKey, { required: false });
 			await navigate({ to: "/" });

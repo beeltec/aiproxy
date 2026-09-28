@@ -1,7 +1,7 @@
--- All times are unix seconds (UTC).
+-- All times are unix seconds (UTC). AUTOINCREMENT: ids of deleted rows are never used again.
 
 CREATE TABLE admins (
-    id            INTEGER PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT    NOT NULL,
     disabled      INTEGER NOT NULL DEFAULT 0,
@@ -10,7 +10,7 @@ CREATE TABLE admins (
 );
 
 CREATE TABLE sessions (
-    id           INTEGER PRIMARY KEY,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash   BLOB    NOT NULL UNIQUE,
     admin_id     INTEGER NOT NULL REFERENCES admins (id) ON DELETE CASCADE,
     created_at   INTEGER NOT NULL,

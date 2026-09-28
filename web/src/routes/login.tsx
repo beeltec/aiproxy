@@ -34,6 +34,8 @@ function LoginPage() {
 		mutationFn: (body: z.infer<typeof schema>) =>
 			call(api.POST("/auth/login", { body })),
 		onSuccess: async (me) => {
+			// Drop data of an earlier session, which may belong to another admin.
+			queryClient.clear();
 			queryClient.setQueryData(meQuery.queryKey, me);
 			await navigate({ to: "/" });
 		},

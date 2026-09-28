@@ -2,6 +2,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -175,18 +176,38 @@ async fn reset_password(
 ) -> ApiResult<StatusCode> {
     validate_password(&req.password)?;
     let password_hash = state.hasher.hash(req.password).await?;
-    let updated = sqlx::query("UPDATE admins SET password_hash = ? WHERE id = ?")
-        .bind(password_hash)
-        .bind(id)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
-    if updated == 0 {
+    let keep = (id == current.admin_id).then_some(current.session_id);
+    if !set_password(&state.db, id, &password_hash, None, keep).await? {
         return Err(ApiError::not_found("The admin does not exist."));
     }
-    let keep = (id == current.admin_id).then_some(current.session_id);
-    session::delete_all_of(&state.db, id, keep).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Sets a new password hash and ends the sessions of the admin, except `keep_session`, in one
+/// transaction. With `expected_hash`, it changes the password only if the current hash is still
+/// that one. Returns false when nothing was changed.
+pub async fn set_password(
+    db: &SqlitePool,
+    admin_id: i64,
+    new_hash: &str,
+    expected_hash: Option<&str>,
+    keep_session: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let updated =
+        sqlx::query("UPDATE admins SET password_hash = ?1 WHERE id = ?2 AND (?3 IS NULL OR password_hash = ?3)")
+            .bind(new_hash)
+            .bind(admin_id)
+            .bind(expected_hash)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    if updated == 0 {
+        return Ok(false);
+    }
+    session::delete_all_of(&mut *tx, admin_id, keep_session).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 async fn missing_or_last(state: &AppState, id: i64) -> ApiError {
