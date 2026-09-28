@@ -673,6 +673,11 @@ export interface components {
 			last_refresh_error?: string | null;
 			/** Format: int64 */
 			last_refresh_failed_at?: number | null;
+			/**
+			 * Format: int64
+			 * @description A usage-limit error blocks the account until this time.
+			 */
+			limited_until?: number | null;
 			/** Format: int64 */
 			models: number;
 			/**
@@ -681,9 +686,26 @@ export interface components {
 			 */
 			next_refresh_at?: number | null;
 			plan_type?: string | null;
+			/** Format: int64 */
+			primary_reset_at?: number | null;
+			/**
+			 * Format: double
+			 * @description Usage limits from the last backend answer (usually a 5-hour and a weekly window).
+			 */
+			primary_used_percent?: number | null;
+			/** Format: int64 */
+			primary_window_minutes?: number | null;
+			/** Format: int64 */
+			quota_updated_at?: number | null;
 			refresh_cron?: string | null;
 			/** @description `inherit`, `custom` or `disabled`. */
 			refresh_mode: string;
+			/** Format: int64 */
+			secondary_reset_at?: number | null;
+			/** Format: double */
+			secondary_used_percent?: number | null;
+			/** Format: int64 */
+			secondary_window_minutes?: number | null;
 			/** @description `active` or `needs_relogin`. */
 			status: string;
 		};

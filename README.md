@@ -46,6 +46,29 @@ Link accounts on the Subscriptions page. The default is the device code: the das
 
 The gateway renews the tokens on a cron plan (Settings page, default `0 0 * * *` in the instance time zone) and when a request needs it. Each account can use its own plan or none. OpenAI does not officially support the use of a subscription outside its own apps. Use it at your own risk.
 
+## Using the gateway
+
+Create an API key on the API keys page. Models are named `chatgpt/<model>` (for example `chatgpt/gpt-6-sol`); a bare name works when only one enabled model has it.
+
+Claude Code:
+
+```sh
+export ANTHROPIC_BASE_URL=https://ai.example.com
+export ANTHROPIC_AUTH_TOKEN=sk-aip-...
+export ANTHROPIC_MODEL=chatgpt/gpt-5.5
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=chatgpt/gpt-6-luna
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000
+```
+
+OpenAI SDKs and tools:
+
+```sh
+export OPENAI_BASE_URL=https://ai.example.com/v1
+export OPENAI_API_KEY=sk-aip-...
+```
+
+Endpoints: `/v1/responses`, `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`. Reasoning effort (`reasoning.effort`, `reasoning_effort`, `output_config.effort` or the Anthropic thinking budget) and fast mode (`service_tier: "fast"` or `"priority"`, Anthropic `speed: "fast"`) are mapped between the formats. The ChatGPT subscription accepts text and images; other input kinds get a clear error. Stored server state (`previous_response_id`, conversations, file ids) is not supported: send the full conversation.
+
 ## Second factors
 
 Each admin can add an authenticator app (TOTP) and passkeys on the Security page. With a second factor, a password alone does not log in. A passkey can also log in without a password. The first second factor gives 10 one-time recovery codes. An admin who lost all factors can get a reset from another admin (Admins page).
