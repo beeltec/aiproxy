@@ -14,7 +14,7 @@ use super::codex::error_text;
 use super::engine::{
     Event, Failure, IDLE_TIMEOUT, Job, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, Outcome, limited_events, too_large,
 };
-use super::{request, sse, upstream_chat, upstream_messages};
+use super::{sse, upstream_chat, upstream_messages};
 use crate::connections::{Connection, Kind};
 use crate::state::AppState;
 use crate::usage::Tokens;
@@ -158,21 +158,7 @@ pub(super) async fn attempt(
 
     let ttl = cache_ttl(&body);
     if native && !stream {
-        let text = tokio::time::timeout(HEADERS_TIMEOUT, response.bytes())
-            .await
-            .map_err(|_| {
-                Failure::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream_timeout",
-                    "The upstream answer came too slowly.",
-                )
-            })?
-            .map_err(|err| upstream_failure(&format!("The upstream answer broke: {err}")))?;
-        if text.len() > MAX_OUTPUT_BYTES {
-            return Err(too_large("The answer is larger than 32 MB."));
-        }
-        let answer: Value =
-            serde_json::from_slice(&text).map_err(|_| upstream_failure("The upstream answer is not JSON."))?;
+        let answer = read_json(response, MAX_OUTPUT_BYTES).await?;
         record_native(wire, &answer, ttl.as_deref(), outcome);
         let _ = tx.send(Msg::Native(answer)).await;
         return Ok(());
@@ -191,6 +177,9 @@ pub(super) async fn attempt(
     let mut output_bytes = 0usize;
     let mut continuations = 0;
     let client_max = body["max_tokens"].as_i64();
+    // The request messages without the paused assistant turn; each continuation adds the
+    // whole content so far once.
+    let request_messages = job_messages(&body);
     loop {
         let mut produced = Vec::new();
         match tokio::time::timeout(IDLE_TIMEOUT, events.next()).await {
@@ -211,11 +200,12 @@ pub(super) async fn attempt(
                 match content {
                     Some(content) => {
                         continuations += 1;
-                        let mut messages = job_messages(&body);
+                        let mut messages = request_messages.clone();
                         messages.push(json!({ "role": "assistant", "content": content }));
                         body["messages"] = Value::Array(messages);
                         if let Some(left) = left {
                             body["max_tokens"] = json!(left);
+                            upstream_messages::fit_thinking_budget(&mut body);
                         }
                         let response = send(state, &connection, wire, &body, &betas, true).await?;
                         events = limited_events(response);
@@ -282,6 +272,30 @@ pub(super) async fn attempt(
             }
         }
     }
+}
+
+/// Reads a JSON answer body with a size limit, within the headers timeout.
+async fn read_json(response: reqwest::Response, limit: usize) -> Result<Value, Failure> {
+    let mut chunks = response.bytes_stream();
+    let mut body = Vec::new();
+    let read = async {
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|err| upstream_failure(&format!("The upstream answer broke: {err}")))?;
+            body.extend_from_slice(&chunk);
+            if body.len() > limit {
+                return Err(too_large("The answer is larger than the limit."));
+            }
+        }
+        Ok(())
+    };
+    tokio::time::timeout(HEADERS_TIMEOUT, read).await.map_err(|_| {
+        Failure::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+            "The upstream answer came too slowly.",
+        )
+    })??;
+    serde_json::from_slice(&body).map_err(|_| upstream_failure("The upstream answer is not JSON."))
 }
 
 fn job_messages(body: &Value) -> Vec<Value> {
@@ -435,10 +449,7 @@ pub(super) async fn count_tokens(
     if !response.status().is_success() {
         return Err(error_answer(response).await);
     }
-    let answer: Value = response
-        .json()
-        .await
-        .map_err(|_| upstream_failure("The upstream answer is not JSON."))?;
+    let answer = read_json(response, 1024 * 1024).await?;
     answer["input_tokens"]
         .as_i64()
         .ok_or_else(|| upstream_failure("The upstream answer has no token count."))
@@ -481,17 +492,53 @@ async fn error_answer(response: reqwest::Response) -> Failure {
 fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>), Failure> {
     let mut body = job.native.clone();
     body["model"] = json!(job.route.upstream_model);
+    // OpenRouter fallbacks and provider routing would pick models that the key may not use.
+    for field in ["models", "provider"] {
+        if kind == Kind::OpenRouter && !body[field].is_null() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` is not supported: it would skip the model list of the key."),
+            ));
+        }
+    }
+    // The prepared body has the alias defaults and the effort that the model supports.
+    let effort = job.body["reasoning"]["effort"].as_str();
+    let tier = job.body["service_tier"]
+        .as_str()
+        .map(|tier| if tier == "fast" { "priority" } else { tier });
     let mut betas = Vec::new();
     match wire {
         Wire::Responses => {
-            if let Some(alias) = &job.route.alias {
-                request::apply_alias(&mut body, alias);
+            if let Some(effort) = effort {
+                body["reasoning"]["effort"] = json!(effort);
+            }
+            if let Some(summary) = job.body["reasoning"]["summary"].as_str() {
+                body["reasoning"]["summary"] = json!(summary);
+            }
+            if let Some(tier) = tier {
+                body["service_tier"] = json!(tier);
             }
             force_responses_fields(&mut body);
         }
         Wire::Chat => {
-            if let Some(alias) = &job.route.alias {
-                upstream_chat::apply_alias(&mut body, alias, kind);
+            if let Some(effort) = effort {
+                match kind {
+                    Kind::OpenRouter
+                        if body["reasoning_effort"].is_null() && body["reasoning"]["max_tokens"].is_null() =>
+                    {
+                        body["reasoning"]["effort"] = json!(effort);
+                    }
+                    Kind::OpenRouter => {}
+                    _ => body["reasoning_effort"] = json!(effort),
+                }
+            }
+            if kind == Kind::OpenAi {
+                if let Some(tier) = tier {
+                    body["service_tier"] = json!(tier);
+                }
+                // No stored conversations under the shared provider account.
+                body["store"] = json!(false);
             }
             if job.stream {
                 body["stream_options"]["include_usage"] = json!(true);
@@ -511,6 +558,9 @@ fn translated_body(state: &AppState, job: &Job, wire: Wire, kind: Kind) -> Resul
             let mut body = job.body.clone();
             body["model"] = json!(job.route.upstream_model);
             body["stream"] = json!(true);
+            if let Some(map) = body.as_object_mut() {
+                map.remove("stop");
+            }
             if body["service_tier"] == "fast" {
                 body["service_tier"] = json!("priority");
             }
@@ -527,8 +577,10 @@ fn translated_body(state: &AppState, job: &Job, wire: Wire, kind: Kind) -> Resul
     }
 }
 
-/// No stored state at the provider, and encrypted reasoning for the next turn.
+/// No stored state at the provider, encrypted reasoning for the next turn, and no reasoning
+/// that another provider made (OpenAI cannot read it).
 fn force_responses_fields(body: &mut Value) {
+    super::codex::drop_foreign_reasoning(body.get_mut("input"));
     body["store"] = json!(false);
     let mut include: Vec<Value> = body["include"].as_array().cloned().unwrap_or_default();
     if !include.iter().any(|v| v == "reasoning.encrypted_content") {

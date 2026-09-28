@@ -96,7 +96,9 @@ impl Resolve for GuardedResolver {
 /// The HTTP client for connection upstreams. It follows no redirects and, unless private
 /// upstreams are allowed, checks every resolved address.
 pub fn client(allow_private: bool) -> reqwest::Result<reqwest::Client> {
+    // A proxy from the environment would resolve the host itself, past the address check.
     let builder = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(30));
     let builder = if allow_private {

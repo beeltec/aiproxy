@@ -201,6 +201,16 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     {
         out.insert("max_output_tokens".into(), json!(max));
     }
+    // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
+    match &body["stop"] {
+        Value::String(stop) => {
+            out.insert("stop".into(), json!([stop]));
+        }
+        Value::Array(stops) => {
+            out.insert("stop".into(), json!(stops));
+        }
+        _ => {}
+    }
     match body["response_format"]["type"].as_str() {
         Some("json_object") => {
             out.insert("text".into(), json!({ "format": { "type": "json_object" } }));
@@ -251,6 +261,12 @@ fn user_parts(content: &Value) -> Result<Vec<Value>, String> {
                 Ok(out)
             }
             "input_audio" => Ok(json!({ "type": "input_audio", "input_audio": part["input_audio"] })),
+            // Not a Responses part: only OpenRouter models with video input take it.
+            "video_url" => {
+                let video = &part["video_url"];
+                let url = video.as_str().or_else(|| video["url"].as_str()).unwrap_or_default();
+                Ok(json!({ "type": "input_video", "video_url": url }))
+            }
             "file" => {
                 let file = &part["file"];
                 if !file["file_id"].is_null() {

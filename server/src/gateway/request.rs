@@ -76,7 +76,11 @@ pub async fn prepare(
     if let Some(alias) = &route.alias {
         apply_alias(&mut body, alias);
     }
-    clamp_effort(&mut body, &route.capabilities);
+    // Anthropic efforts have other names; the Anthropic encoder maps them itself, and `none`
+    // must stay to turn thinking off.
+    if !anthropic {
+        clamp_effort(&mut body, &route.capabilities);
+    }
 
     let output_reserve = body["max_output_tokens"]
         .as_i64()
@@ -310,6 +314,7 @@ fn check_inputs(body: &Value, capabilities: &Value, model: &str) -> Result<(), F
             "input_image" => "image",
             "input_file" => "file",
             "input_audio" => "audio",
+            "input_video" => "video",
             _ => return,
         };
         if !supports(needed) && missing.is_none() {

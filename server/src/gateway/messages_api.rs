@@ -235,6 +235,10 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     if let Some(max) = body["max_tokens"].as_i64() {
         out.insert("max_output_tokens".into(), json!(max));
     }
+    // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
+    if let Some(stops) = body["stop_sequences"].as_array() {
+        out.insert("stop".into(), json!(stops));
+    }
     let format = &body["output_config"]["format"];
     match format["type"].as_str() {
         None => {}

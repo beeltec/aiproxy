@@ -969,14 +969,18 @@ function toDraft(c: Capabilities): Draft {
 const sameList = (a: string[], b: string[]) =>
 	a.length === b.length && a.every((x) => b.includes(x));
 
-/** Only the values that differ from the synced capabilities become overrides. */
+/**
+ * Only the values that differ from the synced capabilities become overrides. Overrides that
+ * the form does not show stay as they are.
+ */
 function toOverrides(
 	draft: Draft,
 	synced: Capabilities,
 	kind: string,
+	current: Overrides,
 ): Overrides {
 	const base = toDraft(synced);
-	const out: Overrides = {};
+	const out: Overrides = current.thinking ? { thinking: current.thinking } : {};
 	if (!sameList(draft.input, base.input)) out.input = draft.input;
 	if (!sameList(draft.efforts, base.efforts)) out.efforts = draft.efforts;
 	if (draft.fast !== base.fast) out.fast = draft.fast;
@@ -1216,7 +1220,12 @@ function CapabilityForm({
 							disabled={!valid || save.isPending}
 							onClick={() =>
 								store(
-									toOverrides(draft, model.capabilities, kind),
+									toOverrides(
+										draft,
+										model.capabilities,
+										kind,
+										model.capability_overrides,
+									),
 									"The capabilities are saved.",
 								)
 							}

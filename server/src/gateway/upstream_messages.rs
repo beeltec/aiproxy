@@ -104,6 +104,21 @@ fn apply_effort(body: &mut Value, effort: &str, client_max: Option<i64>, capabil
     body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
 }
 
+/// A thinking budget must stay below `max_tokens`. Too small a budget leaves thinking out.
+pub fn fit_thinking_budget(body: &mut Value) {
+    let (Some(budget), Some(max)) = (body["thinking"]["budget_tokens"].as_i64(), body["max_tokens"].as_i64()) else {
+        return;
+    };
+    if budget < max {
+        return;
+    }
+    if max > MIN_BUDGET {
+        body["thinking"]["budget_tokens"] = json!(max - 1);
+    } else if let Some(map) = body.as_object_mut() {
+        map.remove("thinking");
+    }
+}
+
 /// Anthropic refuses forced tools with manual thinking, and some models also with adaptive
 /// thinking. Then thinking is left out for the request.
 fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) {
@@ -138,6 +153,12 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             "`fallbacks` is not supported: a fallback model would skip the key's model list.",
         ));
     }
+    // Hosted connectors and containers reuse provider-side objects under the shared key.
+    for field in ["mcp_servers", "container"] {
+        if !body[field].is_null() {
+            return Err(bad(format!("`{field}` is not supported.")));
+        }
+    }
     for tool in body["tools"].as_array_mut().into_iter().flatten() {
         if tool["type"].as_str().is_some_and(|k| k.starts_with("web_search")) {
             direct_search(tool)?;
@@ -154,6 +175,7 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
         if alias.fast && body["speed"].is_null() && capabilities["fast"] == true {
             body["speed"] = json!("fast");
         }
+        drop_thinking_for_forced_tools(body, capabilities);
     }
     let mut betas = Vec::new();
     if body["speed"] == "fast" {
@@ -319,11 +341,9 @@ pub fn encode(
     out.insert("stream".into(), json!(true));
     let model_max = capabilities["max_output"].as_i64();
     let client_max = body["max_output_tokens"].as_i64();
-    let max_tokens = client_max.unwrap_or(model_max.unwrap_or(DEFAULT_MAX_TOKENS).min(DEFAULT_MAX_TOKENS));
-    out.insert(
-        "max_tokens".into(),
-        json!(model_max.map_or(max_tokens, |m| max_tokens.min(m))),
-    );
+    let max_tokens = client_max.unwrap_or(model_max.unwrap_or(DEFAULT_MAX_TOKENS));
+    let max_tokens = model_max.map_or(max_tokens, |m| max_tokens.min(m));
+    out.insert("max_tokens".into(), json!(max_tokens));
 
     let mut tools = Vec::new();
     for tool in body["tools"].as_array().into_iter().flatten() {
@@ -371,7 +391,8 @@ pub fn encode(
 
     let mut body_out = Value::Object(out);
     if let Some(effort) = body["reasoning"]["effort"].as_str() {
-        apply_effort(&mut body_out, effort, client_max, capabilities);
+        // A client limit counts as lowered to the model maximum.
+        apply_effort(&mut body_out, effort, client_max.map(|_| max_tokens), capabilities);
     }
     // Anthropic needs the thinking blocks of the last assistant turn with tool calls. Without
     // them (for example a client that cannot keep them), thinking is left out.
@@ -404,6 +425,9 @@ pub fn encode(
                 body_out[field] = body[field].clone();
             }
         }
+    }
+    if let Some(stops) = body["stop"].as_array() {
+        body_out["stop_sequences"] = json!(stops);
     }
     let format = &body["text"]["format"];
     if format["type"] == "json_schema" {
@@ -898,8 +922,12 @@ impl Decoder for MessagesDecoder {
         Some(self.content.clone())
     }
 
+    /// Only a paused answer that cannot continue ends here; a stream that closed before
+    /// `message_stop` is a failure.
     fn end(&mut self, out: &mut Vec<Event>) {
-        self.finish(out);
+        if self.paused() {
+            self.finish(out);
+        }
     }
 
     fn output_tokens(&self) -> i64 {

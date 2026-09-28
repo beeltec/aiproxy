@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use super::engine::{Event, Failure};
 use super::provider::Decoder;
-use super::routing::{Alias, Route};
+use super::routing::Route;
 use crate::connections::Kind;
 use crate::crypto::random_token;
 use crate::db::now;
@@ -20,22 +20,6 @@ const OPENROUTER_PREFIX: &str = "aipo1:";
 
 fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
-}
-
-/// Alias defaults on a native Chat body.
-pub fn apply_alias(body: &mut Value, alias: &Alias, kind: Kind) {
-    if let Some(effort) = &alias.effort {
-        match kind {
-            Kind::OpenRouter if body["reasoning"].is_null() && body["reasoning_effort"].is_null() => {
-                body["reasoning"] = json!({ "effort": effort });
-            }
-            Kind::OpenAi if body["reasoning_effort"].is_null() => body["reasoning_effort"] = json!(effort),
-            _ => {}
-        }
-    }
-    if alias.fast && kind == Kind::OpenAi && body["service_tier"].is_null() {
-        body["service_tier"] = json!("priority");
-    }
 }
 
 /// Chat usage in billing categories. OpenRouter reports generated image tokens in the output
@@ -73,6 +57,7 @@ fn chat_part(part: &Value) -> Result<Option<Value>, String> {
             Some(json!({ "type": "file", "file": { "file_data": data, "filename": part["filename"] } }))
         }
         "input_audio" => Some(json!({ "type": "input_audio", "input_audio": part["input_audio"] })),
+        "input_video" => Some(json!({ "type": "video_url", "video_url": { "url": part["video_url"] } })),
         "refusal" => None,
         other => return Err(format!("The content type `{other}` is not supported for this model.")),
     })
@@ -259,7 +244,7 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
     if let Some(max) = body["max_output_tokens"].as_i64() {
         out.insert("max_completion_tokens".into(), json!(max));
     }
-    for field in ["temperature", "top_p"] {
+    for field in ["temperature", "top_p", "stop"] {
         if !body[field].is_null() {
             out.insert(field.into(), body[field].clone());
         }
@@ -372,8 +357,12 @@ impl ChatDecoder {
         let Some((item_id, index, text)) = self.reasoning.take() else {
             return;
         };
-        let mut item = json!({ "id": item_id, "type": "reasoning",
-                               "summary": [{ "type": "summary_text", "text": text }] });
+        let summary = if text.is_empty() {
+            json!([])
+        } else {
+            json!([{ "type": "summary_text", "text": text }])
+        };
+        let mut item = json!({ "id": item_id, "type": "reasoning", "summary": summary });
         if self.kind == Kind::OpenRouter && !self.details.is_empty() {
             let details: Vec<Value> = std::mem::take(&mut self.details).into_values().collect();
             let encoded = b64().encode(serde_json::to_vec(&details).unwrap_or_default());
@@ -449,7 +438,7 @@ impl ChatDecoder {
         (item_id.clone(), *index)
     }
 
-    fn reasoning_delta(&mut self, out: &mut Vec<Event>, delta: &str) {
+    fn open_reasoning(&mut self, out: &mut Vec<Event>) {
         if self.reasoning.is_none() {
             let item_id = format!("rs_{}", random_token(12));
             let index = self.next_index;
@@ -468,6 +457,10 @@ impl ChatDecoder {
             );
             self.reasoning = Some((item_id, index, String::new()));
         }
+    }
+
+    fn reasoning_delta(&mut self, out: &mut Vec<Event>, delta: &str) {
+        self.open_reasoning(out);
         let (item_id, index, text) = self.reasoning.as_mut().expect("open");
         text.push_str(delta);
         let (item_id, index) = (item_id.clone(), *index);
@@ -562,8 +555,10 @@ impl Decoder for ChatDecoder {
         }
         for choice in data["choices"].as_array().into_iter().flatten() {
             let delta = &choice["delta"];
+            // Encrypted details can come without any reasoning text; they still need an item.
             if let Some(details) = delta["reasoning_details"].as_array().filter(|d| !d.is_empty()) {
                 self.merge_details(&Value::Array(details.clone()));
+                self.open_reasoning(out);
             }
             let reasoning = delta["reasoning_content"]
                 .as_str()
