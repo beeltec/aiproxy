@@ -540,7 +540,11 @@ fn web_search_blocks(item: &Value) -> [Value; 2] {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|s| json!({ "type": "web_search_result", "url": s["url"], "title": s["title"], "encrypted_content": "", "page_age": null }))
+        .map(|s| {
+            // Anthropic needs a title; a source can come without one.
+            let title = s["title"].as_str().or_else(|| s["url"].as_str()).unwrap_or_default();
+            json!({ "type": "web_search_result", "url": s["url"], "title": title, "encrypted_content": "", "page_age": null })
+        })
         .collect();
     [
         json!({ "type": "server_tool_use", "id": id, "name": "web_search", "input": { "query": item["action"]["query"] } }),

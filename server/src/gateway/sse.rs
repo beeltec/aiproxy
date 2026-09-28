@@ -1,5 +1,7 @@
 //! Server-sent events towards the client, with keep-alive pings.
 
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -25,6 +27,9 @@ pub fn response(
     admission: Admission,
 ) -> Response {
     let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    // Shared, so that a stalled response can drop its queued frames.
+    let queue = Arc::new(Mutex::new(Some(body_rx)));
+    let stalled = queue.clone();
     tokio::spawn(async move {
         loop {
             // Dropping `rx` when the client is gone tells the engine to stop.
@@ -42,6 +47,7 @@ pub fn response(
                     Ok(Ok(())) => {}
                     Ok(Err(_)) => return,
                     Err(_) => {
+                        stalled.lock().expect("queue lock").take();
                         admission.release();
                         return;
                     }
@@ -49,7 +55,10 @@ pub fn response(
             }
         }
     });
-    let stream = futures_util::stream::unfold(body_rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+    let stream = futures_util::stream::poll_fn(move |cx| match queue.lock().expect("queue lock").as_mut() {
+        Some(rx) => rx.poll_recv(cx),
+        None => Poll::Ready(None),
+    });
     let mut response = Body::from_stream(stream).into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));

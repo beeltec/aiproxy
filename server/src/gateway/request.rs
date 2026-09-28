@@ -185,7 +185,8 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
-const HOSTED_TOOLS: [&str; 4] = ["function", "custom", "web_search", "web_search_preview"];
+/// The ChatGPT backend refuses `web_search_preview`.
+const HOSTED_TOOLS: [&str; 3] = ["function", "custom", "web_search"];
 
 fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
     for tool in body["tools"].as_array().into_iter().flatten() {
