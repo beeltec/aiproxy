@@ -1,6 +1,8 @@
 mod config;
 mod web_assets;
 
+use std::future::IntoFuture;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -15,6 +17,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::web_assets::WebAssets;
+
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,9 +44,22 @@ async fn serve() -> anyhow::Result<()> {
         .with_context(|| format!("cannot bind {}", config.bind))?;
     tracing::info!(bind = %config.bind, public_url = %config.public_origin(), "aiproxy started");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let _ = signalled_tx.send(());
+    });
+    let deadline = async {
+        if signalled_rx.await.is_ok() {
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        result = server.into_future() => result?,
+        () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
+    }
     tracing::info!("aiproxy stopped");
     Ok(())
 }
@@ -87,9 +104,14 @@ async fn shutdown_signal() {
 
 /// Container health check. The runtime image has no shell or curl, so the binary checks itself.
 async fn healthcheck() -> anyhow::Result<()> {
-    let port = config::bind_from_env()?.port();
+    let bind = config::bind_from_env()?;
+    let ip = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
     let check = async {
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+        let mut stream = TcpStream::connect(SocketAddr::new(ip, bind.port())).await?;
         stream
             .write_all(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")
             .await?;
