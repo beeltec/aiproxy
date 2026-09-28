@@ -72,6 +72,7 @@ function AdminsPage() {
 	const [adding, setAdding] = useState(false);
 	const [resetting, setResetting] = useState<Admin | null>(null);
 	const [deleting, setDeleting] = useState<Admin | null>(null);
+	const [resettingFactors, setResettingFactors] = useState<Admin | null>(null);
 
 	return (
 		<div className="space-y-6">
@@ -103,6 +104,11 @@ function AdminsPage() {
 							<TableRow key={admin.id}>
 								<TableCell className="pl-4 font-medium">
 									{admin.username}
+									{admin.second_factor && (
+										<Badge variant="outline" className="ml-2">
+											2-step
+										</Badge>
+									)}
 									{admin.id === me?.id && (
 										<span className="eyebrow ml-2">You</span>
 									)}
@@ -126,6 +132,7 @@ function AdminsPage() {
 									<AdminActions
 										admin={admin}
 										onResetPassword={() => setResetting(admin)}
+										onResetFactors={() => setResettingFactors(admin)}
 										onDelete={() => setDeleting(admin)}
 									/>
 								</TableCell>
@@ -140,6 +147,10 @@ function AdminsPage() {
 				onClose={() => setResetting(null)}
 			/>
 			<DeleteAdminDialog admin={deleting} onClose={() => setDeleting(null)} />
+			<ResetFactorsDialog
+				admin={resettingFactors}
+				onClose={() => setResettingFactors(null)}
+			/>
 		</div>
 	);
 }
@@ -147,10 +158,12 @@ function AdminsPage() {
 function AdminActions({
 	admin,
 	onResetPassword,
+	onResetFactors,
 	onDelete,
 }: {
 	admin: Admin;
 	onResetPassword: () => void;
+	onResetFactors: () => void;
 	onDelete: () => void;
 }) {
 	const queryClient = useQueryClient();
@@ -190,6 +203,11 @@ function AdminActions({
 				<DropdownMenuItem onClick={onResetPassword}>
 					Set new password
 				</DropdownMenuItem>
+				{admin.second_factor && (
+					<DropdownMenuItem onClick={onResetFactors}>
+						Reset second factors
+					</DropdownMenuItem>
+				)}
 				<DropdownMenuItem onClick={() => toggle.mutate()}>
 					{admin.disabled ? "Enable" : "Disable"}
 				</DropdownMenuItem>
@@ -415,6 +433,63 @@ function DeleteAdminDialog({
 						onClick={() => admin && remove.mutate(admin.id)}
 					>
 						Delete admin
+					</AlertDialogAction>
+				</AlertDialogFooter>
+			</AlertDialogContent>
+		</AlertDialog>
+	);
+}
+
+function ResetFactorsDialog({
+	admin,
+	onClose,
+}: {
+	admin: Admin | null;
+	onClose: () => void;
+}) {
+	const queryClient = useQueryClient();
+	const reset = useMutation({
+		mutationFn: (id: number) =>
+			call(
+				api.POST("/admins/{id}/second-factors/reset", {
+					params: { path: { id } },
+				}),
+			),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: adminsQuery.queryKey });
+			toast.success(`The second factors of ${admin?.username} are removed.`);
+			onClose();
+		},
+		onError: (error) => {
+			toast.error(errorMessage(error));
+			onClose();
+		},
+	});
+
+	return (
+		<AlertDialog
+			open={admin !== null}
+			onOpenChange={(next) => !next && onClose()}
+		>
+			<AlertDialogContent>
+				<AlertDialogHeader>
+					<AlertDialogTitle>
+						Reset the second factors of {admin?.username}?
+					</AlertDialogTitle>
+					<AlertDialogDescription>
+						This removes the authenticator app, all passkeys and all recovery
+						codes, and logs {admin?.username} out. Use it when {admin?.username}{" "}
+						lost access to them.
+					</AlertDialogDescription>
+				</AlertDialogHeader>
+				<AlertDialogFooter>
+					<AlertDialogCancel>Cancel</AlertDialogCancel>
+					<AlertDialogAction
+						variant="destructive"
+						disabled={reset.isPending}
+						onClick={() => admin && reset.mutate(admin.id)}
+					>
+						Reset second factors
 					</AlertDialogAction>
 				</AlertDialogFooter>
 			</AlertDialogContent>

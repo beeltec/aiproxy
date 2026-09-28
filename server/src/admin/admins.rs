@@ -30,6 +30,28 @@ pub struct AdminView {
     disabled: bool,
     created_at: i64,
     last_login_at: Option<i64>,
+    /// True when the admin has TOTP or a passkey.
+    second_factor: bool,
+}
+
+/// Selects `AdminView` columns. Append a WHERE or ORDER BY clause.
+macro_rules! select_admins {
+    ($rest:literal) => {
+        concat!(
+            "SELECT id, username, disabled, created_at, last_login_at,
+                 EXISTS (SELECT 1 FROM admin_totp t WHERE t.admin_id = admins.id AND t.confirmed = 1)
+                 OR EXISTS (SELECT 1 FROM admin_passkeys p WHERE p.admin_id = admins.id) AS second_factor
+             FROM admins ",
+            $rest
+        )
+    };
+}
+
+async fn fetch_view(db: impl sqlx::SqliteExecutor<'_>, id: i64) -> Result<AdminView, sqlx::Error> {
+    sqlx::query_as(select_admins!("WHERE id = ?"))
+        .bind(id)
+        .fetch_one(db)
+        .await
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -76,10 +98,9 @@ fn last_admin_error() -> ApiError {
 
 #[utoipa::path(get, path = "/admins", tag = "admins", responses((status = OK, body = Vec<AdminView>)))]
 async fn list_admins(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<AdminView>>> {
-    let admins =
-        sqlx::query_as("SELECT id, username, disabled, created_at, last_login_at FROM admins ORDER BY username")
-            .fetch_all(&state.db)
-            .await?;
+    let admins = sqlx::query_as(select_admins!("ORDER BY username"))
+        .fetch_all(&state.db)
+        .await?;
     Ok(Json(admins))
 }
 
@@ -95,20 +116,18 @@ async fn create_admin(
     validate_username(&req.username)?;
     validate_password(&req.password)?;
     let password_hash = state.hasher.hash(req.password).await?;
-    let admin = sqlx::query_as(
-        "INSERT INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)
-         RETURNING id, username, disabled, created_at, last_login_at",
-    )
-    .bind(&req.username)
-    .bind(password_hash)
-    .bind(now())
-    .fetch_one(&state.db)
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::Database(db) if db.is_unique_violation() => ApiError::conflict("This username exists."),
-        other => other.into(),
-    })?;
-    Ok((StatusCode::CREATED, Json(admin)))
+    let id: i64 =
+        sqlx::query_scalar("INSERT INTO admins (username, password_hash, created_at) VALUES (?, ?, ?) RETURNING id")
+            .bind(&req.username)
+            .bind(password_hash)
+            .bind(now())
+            .fetch_one(&state.db)
+            .await
+            .map_err(|err| match err {
+                sqlx::Error::Database(db) if db.is_unique_violation() => ApiError::conflict("This username exists."),
+                other => other.into(),
+            })?;
+    Ok((StatusCode::CREATED, Json(fetch_view(&state.db, id).await?)))
 }
 
 /// Disables or enables an admin. Disabling ends all sessions of that admin.
@@ -126,22 +145,23 @@ async fn update_admin(
     // One statement, so the check and the change cannot race. Session revocation is in the
     // same transaction, so a disabled admin never keeps a session.
     let mut tx = state.db.begin().await?;
-    let admin: Option<AdminView> = sqlx::query_as(
+    let updated = sqlx::query(
         "UPDATE admins SET disabled = ?1 WHERE id = ?2
-             AND (?1 = 0 OR (SELECT COUNT(*) FROM admins WHERE disabled = 0 AND id != ?2) > 0)
-         RETURNING id, username, disabled, created_at, last_login_at",
+             AND (?1 = 0 OR (SELECT COUNT(*) FROM admins WHERE disabled = 0 AND id != ?2) > 0)",
     )
     .bind(req.disabled)
     .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(admin) = admin else {
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated == 0 {
         drop(tx);
         return Err(missing_or_last(&state, id).await);
-    };
+    }
     if req.disabled {
         session::delete_all_of(&mut *tx, id, None).await?;
     }
+    let admin = fetch_view(&mut *tx, id).await?;
     tx.commit().await?;
     Ok(Json(admin))
 }

@@ -3,7 +3,11 @@
 mod account;
 mod admins;
 pub mod auth;
+mod factors;
+mod passkeys;
 mod session;
+
+pub use passkeys::Ceremonies;
 
 use std::time::Duration;
 
@@ -30,6 +34,8 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(auth::router())
         .merge(admins::router())
         .merge(account::router())
+        .merge(factors::router())
+        .merge(passkeys::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

@@ -14,7 +14,7 @@ export const Route = createFileRoute("/_app")({
 		if (typeof window === "undefined") return;
 		if (await context.queryClient.query({ ...meQuery, staleTime: "static" }))
 			return;
-		const setup = await context.queryClient.fetchQuery(setupQuery);
+		const setup = await context.queryClient.query(setupQuery);
 		throw redirect({ to: setup.required ? "/setup" : "/login" });
 	},
 	component: AppLayout,

@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
+use base64::Engine;
 use url::Url;
 
 use crate::client_ip::TrustedProxies;
@@ -12,6 +13,8 @@ pub struct Config {
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
     pub trusted_proxies: TrustedProxies,
+    /// Key for secrets at rest (AES-256-GCM).
+    pub master_key: [u8; 32],
 }
 
 impl Config {
@@ -32,12 +35,14 @@ impl Config {
             .into();
 
         let trusted_proxies = TrustedProxies::parse(&optional("AIPROXY_TRUSTED_PROXIES").unwrap_or_default())?;
+        let master_key = master_key()?;
 
         Ok(Self {
             public_url,
             bind,
             data_dir,
             trusted_proxies,
+            master_key,
         })
     }
 
@@ -52,6 +57,24 @@ pub fn bind_from_env() -> anyhow::Result<SocketAddr> {
         .unwrap_or_else(|| "0.0.0.0:8080".to_owned())
         .parse()
         .context("AIPROXY_BIND is not a valid socket address")
+}
+
+/// Reads the master key from `AIPROXY_MASTER_KEY` or from the file in `AIPROXY_MASTER_KEY_FILE`.
+fn master_key() -> anyhow::Result<[u8; 32]> {
+    let encoded = match (optional("AIPROXY_MASTER_KEY"), optional("AIPROXY_MASTER_KEY_FILE")) {
+        (Some(_), Some(_)) => bail!("set only one of AIPROXY_MASTER_KEY and AIPROXY_MASTER_KEY_FILE"),
+        (Some(key), None) => key,
+        (None, Some(path)) => {
+            std::fs::read_to_string(&path).with_context(|| format!("cannot read AIPROXY_MASTER_KEY_FILE {path}"))?
+        }
+        (None, None) => bail!("AIPROXY_MASTER_KEY is required (create one with: openssl rand -base64 32)"),
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .context("the master key is not valid base64")?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("the master key must be 32 bytes (openssl rand -base64 32)"))
 }
 
 fn required(name: &str) -> anyhow::Result<String> {

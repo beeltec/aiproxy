@@ -14,7 +14,7 @@ import { passwordSchema, usernameSchema } from "#/lib/validation";
 export const Route = createFileRoute("/setup")({
 	beforeLoad: async ({ context }) => {
 		if (typeof window === "undefined") return;
-		const setup = await context.queryClient.fetchQuery(setupQuery);
+		const setup = await context.queryClient.query(setupQuery);
 		if (!setup.required) throw redirect({ to: "/login" });
 	},
 	component: SetupPage,
