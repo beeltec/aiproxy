@@ -180,7 +180,8 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
                 .bind(&refresh)
                 .bind(&id_token)
                 .bind(oauth::expires_at(&tokens.access_token))
-                .bind(now)
+                // The time of the write, so a caller that waited meanwhile shares this result.
+                .bind(crate::db::now())
                 .bind(account)
                 .bind(generation)
                 .execute(&state.db)
@@ -252,9 +253,17 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
             // Stop when the account was linked again or another refresh succeeded meanwhile.
-            let Some((current, last_refresh_at, last_failed_at)) = progress(&state, account).await else {
-                failing = false;
-                break;
+            let (current, last_refresh_at, last_failed_at) = match progress(&state, account).await {
+                Ok(Some(progress)) => progress,
+                // The account was removed.
+                Ok(None) => {
+                    failing = false;
+                    break;
+                }
+                Err(err) => {
+                    tracing::warn!(account, error = %err, "cannot read the refresh state; retrying later");
+                    continue;
+                }
             };
             // Resolved: the latest attempt after this sequence started was a success.
             let resolved = last_refresh_at >= started && last_failed_at.is_none_or(|at| at < last_refresh_at);
@@ -280,15 +289,13 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
     });
 }
 
-async fn progress(state: &AppState, account: i64) -> Option<(i64, i64, Option<i64>)> {
+async fn progress(state: &AppState, account: i64) -> Result<Option<(i64, i64, Option<i64>)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT credential_generation, last_refresh_at, last_refresh_failed_at FROM chatgpt_accounts WHERE id = ?",
     )
     .bind(account)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten()
 }
 
 /// After the last retry failed, the account needs a new login. Only if it still fails: a

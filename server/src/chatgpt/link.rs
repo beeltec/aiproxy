@@ -33,6 +33,8 @@ pub enum FlowState {
     },
     /// The code exchange of a PKCE flow is running.
     Completing,
+    /// The tokens are being saved. Cancelling does not stop this step.
+    Saving,
     Done {
         account: i64,
     },
@@ -84,11 +86,24 @@ impl LinkFlows {
             .map(|flow| flow.session)
     }
 
+    /// Cancels a flow of this session. A flow that is already saving its tokens finishes.
     pub fn cancel(&self, id: &str, session: i64) {
         let mut flows = self.flows.lock().expect("link flows");
-        if flows.get(id).is_some_and(|flow| flow.session == session) {
+        if flows
+            .get(id)
+            .is_some_and(|flow| flow.session == session && !matches!(flow.state, FlowState::Saving))
+        {
             flows.remove(id);
         }
+    }
+
+    /// Marks the flow as saving and returns its session, or `None` when it was cancelled or
+    /// expired. After this, a cancel cannot remove the flow any more.
+    fn claim_for_save(&self, id: &str) -> Option<i64> {
+        let mut flows = self.flows.lock().expect("link flows");
+        let flow = flows.get_mut(id).filter(|flow| flow.started.elapsed() < FLOW_TIMEOUT)?;
+        flow.state = FlowState::Saving;
+        Some(flow.session)
     }
 
     /// Takes a PKCE flow for completion, so the code is exchanged only once.
@@ -202,20 +217,6 @@ pub async fn complete_pkce(state: &AppState, flow: &str, session: i64, pasted_ur
     .unwrap_or_else(|_| failed("The sign-in stopped. Start again."))
 }
 
-/// A link flow may save its tokens only while it is open and its admin session exists. The flow
-/// check runs before the write; the session check is part of the write statement itself.
-pub struct Guard<'a> {
-    state: &'a AppState,
-    flow: &'a str,
-    pub session: i64,
-}
-
-impl Guard<'_> {
-    pub fn flow_open(&self) -> bool {
-        self.state.link_flows.session_of(self.flow).is_some()
-    }
-}
-
 /// SQL condition (literal, for `concat!`): the admin session `?` is a full, active session of an
 /// enabled admin.
 macro_rules! session_active {
@@ -227,11 +228,10 @@ macro_rules! session_active {
 pub(crate) use session_active;
 
 async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowState {
-    let Some(session) = state.link_flows.session_of(flow) else {
+    let Some(session) = state.link_flows.claim_for_save(flow) else {
         return failed("The sign-in was cancelled.");
     };
-    let guard = Guard { state, flow, session };
-    match accounts::store_link(state, tokens, &guard).await {
+    match accounts::store_link(state, tokens, session).await {
         Ok(account) => {
             if let Err(err) = models::sync_account(state, account).await {
                 tracing::warn!(account, error = %err, "cannot load the model list");

@@ -280,7 +280,9 @@ fn link_error(message: String) -> ApiError {
 
 fn status_of(state: FlowState) -> LinkStatus {
     let (status, account_id, message) = match state {
-        FlowState::Device | FlowState::Pkce { .. } | FlowState::Completing => ("pending", None, None),
+        FlowState::Device | FlowState::Pkce { .. } | FlowState::Completing | FlowState::Saving => {
+            ("pending", None, None)
+        }
         FlowState::Done { account } => ("done", Some(account), None),
         FlowState::Failed { message } => ("failed", None, Some(message)),
     };

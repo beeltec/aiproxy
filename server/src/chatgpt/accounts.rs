@@ -3,7 +3,7 @@
 use crate::db::now;
 use crate::state::AppState;
 
-use super::link::{Guard, session_active};
+use super::link::session_active;
 use super::oauth::{self, OAuthError, TokenSet};
 
 /// Associated data for an encrypted token field. The ChatGPT account id never changes, so the
@@ -27,8 +27,9 @@ pub enum LinkError {
 /// Stores the tokens of a new login. The same ChatGPT account updates its row (re-link); the
 /// credential generation goes up, so a refresh that started before does not overwrite them.
 /// Returns the row id.
-/// `guard` is checked right before each write, after the account lock is taken.
-pub async fn store_link(state: &AppState, tokens: &TokenSet, guard: &Guard<'_>) -> Result<i64, LinkError> {
+/// `session` is the admin session of the sign-in. The writes check in the same statement that it
+/// still exists, so a revoked admin cannot save an account.
+pub async fn store_link(state: &AppState, tokens: &TokenSet, session: i64) -> Result<i64, LinkError> {
     let identity = oauth::identity(&tokens.id_token)?;
     let id = &identity.account_id;
     let enc = |field: &str, value: &str| state.secrets.encrypt(&aad(id, field), value.as_bytes());
@@ -41,9 +42,6 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet, guard: &Guard<'_>) 
             .await?;
         if let Some(row_id) = existing {
             let _lock = state.refresher.lock(row_id).await;
-            if !guard.flow_open() {
-                return Err(LinkError::Cancelled);
-            }
             let updated = sqlx::query(concat!(
                 "UPDATE chatgpt_accounts SET email = ?, plan_type = ?, access_token_enc = ?, refresh_token_enc = ?,
                      id_token_enc = ?, access_expires_at = ?, credential_generation = credential_generation + 1,
@@ -59,24 +57,17 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet, guard: &Guard<'_>) 
             .bind(oauth::expires_at(&tokens.access_token))
             .bind(now())
             .bind(row_id)
-            .bind(guard.session)
+            .bind(session)
             .execute(&state.db)
             .await?
             .rows_affected();
             if updated == 0 {
-                return Err(if guard.flow_open() {
-                    LinkError::Removed
-                } else {
-                    LinkError::Cancelled
-                });
+                return Err(LinkError::Removed);
             }
             tracing::info!(account = row_id, "ChatGPT account linked again");
             return Ok(row_id);
         }
 
-        if !guard.flow_open() {
-            return Err(LinkError::Cancelled);
-        }
         // The first account becomes the primary account.
         let inserted: Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(concat!(
             "INSERT INTO chatgpt_accounts (chatgpt_account_id, email, plan_type, access_token_enc, refresh_token_enc,
@@ -97,7 +88,7 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet, guard: &Guard<'_>) 
         .bind(oauth::expires_at(&tokens.access_token))
         .bind(now())
         .bind(now())
-        .bind(guard.session)
+        .bind(session)
         .fetch_optional(&state.db)
         .await;
         match inserted {
