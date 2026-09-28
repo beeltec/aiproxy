@@ -59,7 +59,7 @@ async fn serve() -> anyhow::Result<()> {
     let db = db::open(&config.data_dir).await?;
     let bind = config.bind;
     let public_origin = config.public_origin();
-    let app = router(AppState::new(config, db), WebAssets::new());
+    let app = router(AppState::new(config, db)?, WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("cannot bind {bind}"))?;

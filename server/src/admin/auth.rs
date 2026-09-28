@@ -9,7 +9,8 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::admins::{validate_password, validate_username};
-use super::session::{self, AdminSession};
+use super::factors::{self, Methods};
+use super::session::{self, AdminSession, ClientInfo, Kind, Proof};
 use crate::client_ip::ClientIp;
 use crate::crypto::{random_bytes, sha256};
 use crate::db::now;
@@ -47,8 +48,15 @@ pub struct LoginRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct Me {
-    id: i64,
-    username: String,
+    pub id: i64,
+    pub username: String,
+}
+
+/// Either the logged-in admin, or the second factors to use next.
+#[derive(Serialize, ToSchema)]
+pub struct LoginResponse {
+    me: Option<Me>,
+    second_factor: Option<Methods>,
 }
 
 /// Creates the setup token for the first admin. Returns the token.
@@ -144,9 +152,19 @@ async fn setup(
     tx.commit().await?;
 
     tracing::info!(username = %req.username, "first admin created");
-    let cookie = session::create(&state.db, admin_id, &hash_for_session, &ip, user_agent(&headers))
-        .await?
-        .ok_or_else(ApiError::unauthorized)?;
+    let client = ClientInfo {
+        ip: &ip,
+        user_agent: user_agent(&headers),
+    };
+    let cookie = session::create(
+        &state.db,
+        admin_id,
+        Proof::Password(&hash_for_session),
+        Kind::Full,
+        client,
+    )
+    .await?
+    .ok_or_else(ApiError::unauthorized)?;
     Ok((
         jar.add(cookie),
         Json(Me {
@@ -161,7 +179,7 @@ async fn admin_count_tx(tx: &mut sqlx::SqliteConnection) -> Result<i64, sqlx::Er
 }
 
 #[utoipa::path(post, path = "/auth/login", tag = "auth", request_body = LoginRequest, responses(
-    (status = OK, body = Me),
+    (status = OK, body = LoginResponse),
     (status = UNAUTHORIZED, body = ErrorBody),
     (status = TOO_MANY_REQUESTS, body = ErrorBody),
 ))]
@@ -171,7 +189,7 @@ async fn login(
     headers: HeaderMap,
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
-) -> ApiResult<(CookieJar, Json<Me>)> {
+) -> ApiResult<(CookieJar, Json<LoginResponse>)> {
     let invalid = || {
         ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -211,21 +229,34 @@ async fn login(
             .await?;
     let hash = admin.as_ref().map(|(_, _, hash)| hash.clone());
     let valid = state.hasher.verify(hash, req.password).await?;
-    let session = match admin.filter(|_| valid) {
-        Some((admin_id, username, hash)) => {
-            session::create(&state.db, admin_id, &hash, &ip.to_string(), user_agent(&headers))
-                .await?
-                .map(|cookie| (cookie, Me { id: admin_id, username }))
-        }
-        None => None,
-    };
-    let Some((cookie, me)) = session else {
+    let Some((admin_id, username, hash)) = admin.filter(|_| valid) else {
         return Err(invalid());
     };
+    // With a second factor, the password gives only a pending session.
+    let methods = factors::methods(&state.db, admin_id).await?;
+    let kind = if methods.any() { Kind::Pending } else { Kind::Full };
+    let client = ClientInfo {
+        ip: &ip.to_string(),
+        user_agent: user_agent(&headers),
+    };
+    let cookie = session::create(&state.db, admin_id, Proof::Password(&hash), kind, client)
+        .await?
+        .ok_or_else(invalid)?;
 
     limits.failures.release(&ip_key);
     limits.failures.clear(&user_key);
-    Ok((jar.add(cookie), Json(me)))
+    let response = if methods.any() {
+        LoginResponse {
+            me: None,
+            second_factor: Some(methods),
+        }
+    } else {
+        LoginResponse {
+            me: Some(Me { id: admin_id, username }),
+            second_factor: None,
+        }
+    };
+    Ok((jar.add(cookie), Json(response)))
 }
 
 #[utoipa::path(post, path = "/auth/logout", tag = "auth", responses((status = NO_CONTENT)))]
@@ -245,6 +276,6 @@ async fn me(session: AdminSession) -> Json<Me> {
     })
 }
 
-fn user_agent(headers: &HeaderMap) -> Option<&str> {
+pub fn user_agent(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok())
 }

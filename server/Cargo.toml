@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aes-gcm = "0.11.1"
 anyhow = "1.0.104"
 argon2 = "0.6.0"
 axum = "0.8.9"
@@ -12,6 +13,7 @@ base64 = "0.23.1"
 chrono = "0.4.45"
 ipnet = "2.12.2"
 libc = "0.2.189"
+openssl = { version = "0.10.81", features = ["vendored"] }
 rand = "0.10.3"
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -20,9 +22,13 @@ sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono"] }
 time = "0.3.55"
 tokio = { version = "1.53.1", features = ["full"] }
+totp-rs = { version = "6.0.0", features = ["otpauth", "qr", "gen_secret"] }
 tower-http = { version = "0.7.1", features = ["trace", "set-header", "limit"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 utoipa = { version = "6.0.0", features = ["axum_extras", "chrono"] }
 utoipa-axum = "0.3.0"
+uuid = { version = "1.26.1", features = ["v4"] }
+webauthn-rs = { version = "0.5.5", features = ["conditional-ui"] }
+webauthn-rs-proto = "0.5.5"

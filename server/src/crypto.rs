@@ -1,6 +1,8 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, PasswordHasher as _, PasswordVerifier as _, Version};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -89,5 +91,51 @@ impl PasswordHasher {
         .await
         .expect("hash task does not panic");
         Ok(result)
+    }
+}
+
+/// Encrypts and decrypts secrets at rest with AES-256-GCM. The associated data binds a value to
+/// its place (for example "admin_totp:7"), so a value cannot be moved to another row.
+#[derive(Clone)]
+pub struct SecretBox {
+    cipher: Arc<Aes256Gcm>,
+}
+
+const NONCE_LEN: usize = 12;
+
+impl SecretBox {
+    pub fn new(key: &[u8; 32]) -> Self {
+        Self {
+            cipher: Arc::new(Aes256Gcm::new(key.into())),
+        }
+    }
+
+    /// Returns nonce followed by the ciphertext.
+    pub fn encrypt(&self, associated: &str, plaintext: &[u8]) -> Vec<u8> {
+        let nonce = random_bytes(NONCE_LEN);
+        let payload = Payload {
+            msg: plaintext,
+            aad: associated.as_bytes(),
+        };
+        let ciphertext = self
+            .cipher
+            .encrypt(&Nonce::try_from(nonce.as_slice()).expect("nonce has 12 bytes"), payload)
+            .expect("AES-GCM encryption does not fail");
+        [nonce, ciphertext].concat()
+    }
+
+    /// Fails when the data was changed, belongs to another place, or was made with another key.
+    pub fn decrypt(&self, associated: &str, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+        if data.len() < NONCE_LEN {
+            anyhow::bail!("encrypted value is too short");
+        }
+        let (nonce, ciphertext) = data.split_at(NONCE_LEN);
+        let payload = Payload {
+            msg: ciphertext,
+            aad: associated.as_bytes(),
+        };
+        self.cipher
+            .decrypt(&Nonce::try_from(nonce).expect("nonce has 12 bytes"), payload)
+            .map_err(|_| anyhow::anyhow!("cannot decrypt a stored secret (wrong master key?)"))
     }
 }

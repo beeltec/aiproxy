@@ -9,6 +9,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { z } from "zod";
 import { PageHeader } from "#/components/page-header";
+import { factorsQuery, SecondFactors } from "#/components/second-factors";
 import { TextField } from "#/components/text-field";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
@@ -32,7 +33,10 @@ const sessionsQuery = queryOptions({
 
 export const Route = createFileRoute("/_app/security")({
 	loader: ({ context }) =>
-		context.queryClient.query({ ...sessionsQuery, staleTime: "static" }),
+		Promise.all([
+			context.queryClient.query({ ...sessionsQuery, staleTime: "static" }),
+			context.queryClient.query({ ...factorsQuery, staleTime: "static" }),
+		]),
 	component: SecurityPage,
 });
 
@@ -41,13 +45,19 @@ function SecurityPage() {
 		<div className="space-y-10">
 			<PageHeader
 				title="Security"
-				description="Your password and the devices where you are logged in."
+				description="Your password, the second login step, and the devices where you are logged in."
 			/>
 			<Section
 				title="Password"
 				description="Changing it logs you out on all other devices."
 			>
 				<ChangePasswordForm />
+			</Section>
+			<Section
+				title="Two-step login"
+				description="After the password, the login asks for one more proof. Passkeys also work without a password."
+			>
+				<SecondFactors />
 			</Section>
 			<Section
 				title="Sessions"
