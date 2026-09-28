@@ -11,6 +11,7 @@ use crate::state::AppState;
 /// Output tokens reserved for the tokens-per-minute limit when the client sets no maximum.
 const DEFAULT_OUTPUT_RESERVE: i64 = 4_000;
 const MAX_OUTPUT_RESERVE: i64 = 8_000;
+const MAX_MODEL_NAME: usize = 200;
 
 pub struct Prepared {
     pub job: Job,
@@ -89,6 +90,13 @@ pub fn bad_json(rejection: &axum::extract::rejection::JsonRejection) -> Failure 
 
 /// Finds the enabled model for a name and checks that the key may use it.
 pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Route, Failure> {
+    if requested.len() > MAX_MODEL_NAME {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The model name is too long.",
+        ));
+    }
     let route = match routing::resolve(&state.db, requested).await {
         Ok(route) => route,
         Err(RouteError::NotFound(name)) => {

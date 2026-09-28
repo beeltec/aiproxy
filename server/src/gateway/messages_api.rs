@@ -38,7 +38,6 @@ pub async fn create(
         Ok(converted) => converted,
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
-    let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
     let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission).await {
@@ -46,6 +45,7 @@ pub async fn create(
         Err(failure) => return error(failure),
     };
     let stream = prepared.job.stream;
+    let requested = prepared.job.route.requested.clone();
     let rx = match engine::start(&state, prepared.job).await {
         Ok(rx) => rx,
         Err(failure) => return error(failure),
@@ -93,7 +93,7 @@ pub async fn count_tokens(
             client_format: "messages",
             upstream: "local",
             chatgpt_account_id: None,
-            requested_model: requested.to_owned(),
+            requested_model: route.requested,
             resolved_model: Some(route.qualified),
             effort: None,
             service_tier_requested: None,

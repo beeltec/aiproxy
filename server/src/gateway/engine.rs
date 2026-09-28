@@ -114,6 +114,8 @@ struct Outcome {
     first_token_ms: Option<i64>,
     streamed_chars: usize,
     attempts: i64,
+    /// Completed web searches, also known when the stream stops early.
+    web_search_calls: i64,
     /// True after an upstream accepted the request, so tokens can be used.
     generation_started: bool,
 }
@@ -429,6 +431,9 @@ async fn stream_events(
             if output_bytes > MAX_OUTPUT_BYTES {
                 return StreamEnd::Failed(too_large("The answer is larger than 32 MB."));
             }
+            if data["item"]["type"] == "web_search_call" && data["item"]["action"]["type"] == "search" {
+                outcome.web_search_calls += 1;
+            }
             output_items.push(data["item"].clone());
         }
         if kind.ends_with(".delta") {
@@ -513,12 +518,6 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
-    let web_search_calls = response.and_then(|r| r["output"].as_array()).map_or(0, |items| {
-        items
-            .iter()
-            .filter(|item| item["type"] == "web_search_call" && item["action"]["type"] == "search")
-            .count() as i64
-    });
     let row = Row {
         request_id: random_token(12),
         time: now(),
@@ -539,7 +538,7 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         first_token_ms: outcome.first_token_ms,
         usage_status,
         tokens,
-        web_search_calls,
+        web_search_calls: outcome.web_search_calls,
         failover_attempts: (outcome.attempts - 1).max(0),
     };
     state.usage.record(row).await;

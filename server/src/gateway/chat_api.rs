@@ -31,13 +31,13 @@ pub async fn create(
         Ok(converted) => converted,
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
-    let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
     let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
     let stream = prepared.job.stream;
+    let requested = prepared.job.route.requested.clone();
     let rx = match engine::start(&state, prepared.job).await {
         Ok(rx) => rx,
         Err(failure) => return error(failure),
@@ -67,6 +67,12 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
             "assistant" => {
                 let text = text_of(&message["content"]);
                 let tool_calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+                if let Some(refusal) = message["refusal"].as_str().filter(|r| !r.is_empty()) {
+                    input.push(json!({
+                        "type": "message", "role": "assistant",
+                        "content": [{ "type": "refusal", "refusal": refusal }],
+                    }));
+                }
                 if !text.is_empty() {
                     // Text before tool calls is an intermediate update, not the final answer.
                     let phase = if tool_calls.is_empty() {
@@ -105,9 +111,14 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     }
     out.insert("stream".into(), json!(body["stream"].as_bool().unwrap_or(false)));
     if let Some(tools) = body["tools"].as_array() {
+        if let Some(other) = tools.iter().find(|t| t["type"] != "function") {
+            return Err(format!(
+                "The tool type `{}` is not supported. Use function tools or `web_search_options`.",
+                other["type"].as_str().unwrap_or_default()
+            ));
+        }
         let tools: Vec<Value> = tools
             .iter()
-            .filter(|t| t["type"] == "function")
             .map(|t| {
                 let f = &t["function"];
                 json!({ "type": "function", "name": f["name"], "description": f["description"],
