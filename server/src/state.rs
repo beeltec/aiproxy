@@ -1,5 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use axum::extract::FromRef;
 use sqlx::SqlitePool;
@@ -36,6 +38,10 @@ pub struct AppState {
     /// Wakes the refresh scheduler after changes to the plans.
     pub schedule_changed: Arc<Notify>,
     pub usage: UsageWriter,
+    /// Running gateway requests, so that shutdown can wait for their usage rows.
+    pub gateway_tasks: TaskTracker,
+    /// Cancelled at shutdown: running gateway requests stop and record their usage.
+    pub stopping: CancellationToken,
 }
 
 /// Limits for login and setup attempts.
@@ -63,6 +69,8 @@ impl AppState {
             link_flows: Arc::default(),
             schedule_changed: Arc::default(),
             usage: UsageWriter::start(db.clone()),
+            gateway_tasks: TaskTracker::new(),
+            stopping: CancellationToken::new(),
             config: Arc::new(config),
             db,
             hasher: PasswordHasher::new(),

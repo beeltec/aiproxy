@@ -23,7 +23,7 @@ pub async fn create(
         .get("session_id")
         .or_else(|| headers.get("session-id"))
         .and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission.take()).await {
+    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };

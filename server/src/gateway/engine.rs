@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use super::auth::{ApiKey, Permits};
+use super::auth::{Admission, ApiKey};
 use super::codex::{self, SendError};
 use super::routing::Route;
 use crate::chatgpt::refresh::{self, Trigger};
@@ -27,6 +27,11 @@ const MAX_HELD_EVENTS: usize = 1000;
 const MAX_HELD_BYTES: usize = 1024 * 1024;
 /// Upper bound for everything one upstream answer may send.
 const MAX_UPSTREAM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
+/// Upper bound for the output items kept for the final response.
+const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Longest wait to give a late error to a client that does not read.
+const ERROR_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Refresh the access token when it expires within this time.
 const REFRESH_MARGIN: i64 = 5 * 60;
 
@@ -77,8 +82,8 @@ pub struct Job {
     pub cache_key: String,
     /// Tokens reserved for the tokens-per-minute limit.
     pub reserved_tokens: i64,
-    /// Concurrency slots. They stay taken until the engine ends.
-    pub permits: Option<Permits>,
+    /// Concurrency slots. They stay taken until the engine and the response body end.
+    pub _permits: Admission,
 }
 
 /// Starts the request. Returns when the upstream accepted it, or with the error to send as
@@ -88,7 +93,7 @@ pub async fn start(state: &AppState, job: Job) -> Result<mpsc::Receiver<Msg>, Fa
     let (opened_tx, opened_rx) = oneshot::channel();
     let (tx, rx) = mpsc::channel(64);
     let state = state.clone();
-    tokio::spawn(run(state, job, opened_tx, tx));
+    state.gateway_tasks.clone().spawn(run(state, job, opened_tx, tx));
     match opened_rx.await {
         Ok(Ok(())) => Ok(rx),
         Ok(Err(failure)) => Err(failure),
@@ -122,29 +127,48 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
     };
     let body = codex::backend_body(&job.body, &job.route.upstream_model, &job.cache_key);
 
-    let work = attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started);
-    let result = match tokio::time::timeout(TOTAL_TIMEOUT, work).await {
-        Ok(result) => result,
-        Err(_) => Err(Failure::new(
-            StatusCode::GATEWAY_TIMEOUT,
-            "timeout",
-            "The request took longer than one hour.",
+    // Dropping the work future also stops the upstream request.
+    let result = tokio::select! {
+        result = tokio::time::timeout(
+            TOTAL_TIMEOUT,
+            attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started),
+        ) => result.unwrap_or_else(|_| {
+            Err(Failure::new(StatusCode::GATEWAY_TIMEOUT, "timeout", "The request took longer than one hour."))
+        }),
+        () = tx.closed() => Err(client_closed()),
+        () = state.stopping.cancelled() => Err(Failure::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "The server is stopping.",
         )),
     };
     if let Err(failure) = result {
-        outcome.status = failure.status.as_u16();
+        outcome.status = if failure.code == CLIENT_CLOSED {
+            499
+        } else {
+            failure.status.as_u16()
+        };
         outcome.error_kind = Some(failure.code.to_owned());
         match opened.take() {
             Some(opened) => {
                 let _ = opened.send(Err(failure));
             }
             None => {
-                let _ = tx.send(Msg::Failed(failure)).await;
+                let _ = tokio::time::timeout(ERROR_SEND_TIMEOUT, tx.send(Msg::Failed(failure))).await;
             }
         }
     }
     record_usage(&state, &job, &outcome, started).await;
-    drop(job.permits);
+}
+
+const CLIENT_CLOSED: &str = "client_closed";
+
+fn client_closed() -> Failure {
+    Failure::new(
+        StatusCode::BAD_REQUEST,
+        CLIENT_CLOSED,
+        "The client closed the connection.",
+    )
 }
 
 /// Tries the accounts in order until one answers, then streams its events.
@@ -173,12 +197,7 @@ async fn attempts(
     };
 
     let mut last_failure = None;
-    for account in accounts {
-        if tx.is_closed() {
-            outcome.status = 499;
-            outcome.error_kind = Some("client_closed".into());
-            return Ok(());
-        }
+    'accounts: for account in accounts {
         outcome.attempts += 1;
         outcome.account = Some(account);
         if !fresh_token(state, account).await {
@@ -189,41 +208,45 @@ async fn attempts(
             ));
             continue;
         }
-        let response = match send_with_refresh(state, account, body).await {
-            Ok(response) => response,
-            Err(SendError::UsageLimit { until, message }) => {
-                select::mark_limited(state, account, until).await;
-                let mut failure = Failure::new(StatusCode::TOO_MANY_REQUESTS, "usage_limit_reached", message);
-                failure.retry_after = Some((until - now()).max(1) as u64);
-                last_failure = Some(failure);
-                continue;
+        // A token error in the stream renews the token and sends the request to the same
+        // account once more.
+        let mut renewed = false;
+        loop {
+            let response = match send_with_refresh(state, account, body).await {
+                Ok(response) => response,
+                Err(error) => match failure_of(state, account, error).await {
+                    Next::Account(failure) => {
+                        last_failure = Some(failure);
+                        continue 'accounts;
+                    }
+                    Next::Stop(failure) => return Err(failure),
+                },
+            };
+            outcome.generation_started = true;
+            // The upstream accepted the request: the client gets a success status now.
+            if let Some(opened) = opened.take() {
+                let _ = opened.send(Ok(()));
             }
-            Err(SendError::Unauthorized) => {
-                last_failure = Some(unauthorized());
-                continue;
+            match stream_events(state, account, response, tx, outcome, started).await {
+                StreamEnd::Done => return Ok(()),
+                StreamEnd::ClientGone => return Err(client_closed()),
+                StreamEnd::Unauthorized if !renewed => {
+                    if refresh::refresh(state, account, Trigger::Request).await.is_err() {
+                        last_failure = Some(unauthorized());
+                        continue 'accounts;
+                    }
+                    renewed = true;
+                }
+                StreamEnd::Unauthorized => {
+                    last_failure = Some(unauthorized());
+                    continue 'accounts;
+                }
+                StreamEnd::Retry(failure) => {
+                    last_failure = Some(failure);
+                    continue 'accounts;
+                }
+                StreamEnd::Failed(failure) => return Err(failure),
             }
-            Err(SendError::Failed { status, message }) => {
-                let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-                return Err(Failure::new(status, "upstream_error", message));
-            }
-        };
-        outcome.generation_started = true;
-        // The upstream accepted the request: the client gets a success status now.
-        if let Some(opened) = opened.take() {
-            let _ = opened.send(Ok(()));
-        }
-        match stream_events(state, account, response, tx, outcome, started).await {
-            StreamEnd::Done => return Ok(()),
-            StreamEnd::ClientGone => {
-                outcome.status = 499;
-                outcome.error_kind = Some("client_closed".into());
-                return Ok(());
-            }
-            StreamEnd::Retry(failure) => {
-                last_failure = Some(failure);
-                continue;
-            }
-            StreamEnd::Failed(failure) => return Err(failure),
         }
     }
     Err(last_failure.unwrap_or_else(|| {
@@ -233,6 +256,34 @@ async fn attempts(
             "No ChatGPT account is available.",
         )
     }))
+}
+
+enum Next {
+    /// Try the next account.
+    Account(Failure),
+    Stop(Failure),
+}
+
+/// What an upstream error means for the account loop.
+async fn failure_of(state: &AppState, account: i64, error: SendError) -> Next {
+    match error {
+        SendError::UsageLimit { until, message } => {
+            select::mark_limited(state, account, until).await;
+            let mut failure = Failure::new(StatusCode::TOO_MANY_REQUESTS, "usage_limit_reached", message);
+            failure.retry_after = Some((until - now()).max(1) as u64);
+            Next::Account(failure)
+        }
+        SendError::Throttled { retry_after, message } => {
+            let mut failure = Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded", message);
+            failure.retry_after = retry_after.map(|s| s.max(1) as u64);
+            Next::Account(failure)
+        }
+        SendError::Unauthorized => Next::Account(unauthorized()),
+        SendError::Failed { status, message } => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            Next::Stop(Failure::new(status, "upstream_error", message))
+        }
+    }
 }
 
 fn unauthorized() -> Failure {
@@ -273,6 +324,8 @@ enum StreamEnd {
     ClientGone,
     /// Failed before any content reached the client: try the next account.
     Retry(Failure),
+    /// The token was refused before any content reached the client.
+    Unauthorized,
     Failed(Failure),
 }
 
@@ -311,13 +364,10 @@ async fn stream_events(
     let mut held_bytes = 0usize;
     let mut committed = false;
     let mut output_items: Vec<Value> = Vec::new();
+    let mut output_bytes = 0usize;
 
     loop {
-        let next = tokio::select! {
-            () = tx.closed() => return StreamEnd::ClientGone,
-            next = tokio::time::timeout(IDLE_TIMEOUT, events.next()) => next,
-        };
-        let next = match next {
+        let next = match tokio::time::timeout(IDLE_TIMEOUT, events.next()).await {
             Err(_) => {
                 return StreamEnd::Failed(Failure::new(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -341,6 +391,9 @@ async fn stream_events(
             }
             Ok(Some(Ok(event))) => event,
         };
+        if next.data.len() > MAX_EVENT_BYTES {
+            return StreamEnd::Failed(too_large("The ChatGPT backend sent an event larger than 16 MB."));
+        }
         let Ok(mut data) = serde_json::from_str::<Value>(&next.data) else {
             continue;
         };
@@ -354,29 +407,22 @@ async fn stream_events(
             } else {
                 data.clone()
             };
-            let failure = match codex::classify(400, &json!({ "error": error }).to_string(), None) {
-                SendError::UsageLimit { until, message } if !committed => {
-                    select::mark_limited(state, account, until).await;
-                    return StreamEnd::Retry(Failure::new(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "usage_limit_reached",
-                        message,
-                    ));
-                }
-                SendError::UsageLimit { message, .. } => {
-                    Failure::new(StatusCode::TOO_MANY_REQUESTS, "usage_limit_reached", message)
-                }
-                SendError::Unauthorized if !committed => {
-                    let _ = refresh::refresh(state, account, Trigger::Request).await;
-                    return StreamEnd::Retry(unauthorized());
-                }
-                SendError::Unauthorized => unauthorized(),
-                SendError::Failed { message, .. } => Failure::new(StatusCode::BAD_GATEWAY, "upstream_error", message),
+            let error = codex::classify(400, &json!({ "error": error }).to_string(), None);
+            return match error {
+                SendError::Unauthorized if !committed => StreamEnd::Unauthorized,
+                SendError::Unauthorized => StreamEnd::Failed(unauthorized()),
+                error => match failure_of(state, account, error).await {
+                    Next::Account(failure) if !committed => StreamEnd::Retry(failure),
+                    Next::Account(failure) | Next::Stop(failure) => StreamEnd::Failed(failure),
+                },
             };
-            return StreamEnd::Failed(failure);
         }
 
         if kind == "response.output_item.done" {
+            output_bytes += next.data.len();
+            if output_bytes > MAX_OUTPUT_BYTES {
+                return StreamEnd::Failed(too_large("The answer is larger than 32 MB."));
+            }
             output_items.push(data["item"].clone());
         }
         if kind.ends_with(".delta") {
@@ -422,6 +468,10 @@ async fn stream_events(
             return StreamEnd::Done;
         }
     }
+}
+
+fn too_large(message: &str) -> Failure {
+    Failure::new(StatusCode::BAD_GATEWAY, "upstream_too_large", message)
 }
 
 #[derive(Debug)]

@@ -3,9 +3,9 @@
 use axum::http::StatusCode;
 use serde_json::Value;
 
-use super::auth::ApiKey;
+use super::auth::{Admission, ApiKey};
 use super::engine::{Failure, Job};
-use super::routing::{self, RouteError};
+use super::routing::{self, Route, RouteError};
 use crate::state::AppState;
 
 /// Output tokens reserved for the tokens-per-minute limit when the client sets no maximum.
@@ -16,8 +16,6 @@ pub struct Prepared {
     pub job: Job,
 }
 
-pub use super::auth::Permits;
-
 /// Validates a Responses request body and builds the job.
 pub async fn prepare(
     state: &AppState,
@@ -26,7 +24,7 @@ pub async fn prepare(
     route_name: &'static str,
     client_format: &'static str,
     cache_hint: Option<&str>,
-    permits: Option<Permits>,
+    permits: Admission,
 ) -> Result<Prepared, Failure> {
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
@@ -34,39 +32,7 @@ pub async fn prepare(
         .ok_or_else(|| bad("The field `model` is missing."))?;
     reject_stored_state(&body)?;
     reject_hosted_tools(&body)?;
-
-    let route = match routing::resolve(&state.db, requested).await {
-        Ok(route) => route,
-        Err(RouteError::NotFound(name)) => {
-            return Err(Failure::new(
-                StatusCode::NOT_FOUND,
-                "model_not_found",
-                format!("The model `{name}` does not exist or is not enabled."),
-            ));
-        }
-        Err(RouteError::Ambiguous(name, options)) => {
-            return Err(bad(&format!(
-                "`{name}` matches several models. Use one of: {}.",
-                options.join(", ")
-            )));
-        }
-        Err(RouteError::Db(err)) => {
-            tracing::error!(error = %err, "database error in routing");
-            return Err(Failure::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "Internal error.",
-            ));
-        }
-    };
-    if !routing::allowed(&key.allowlist, &route) {
-        state.rejected.count(super::rejected::Reason::NotAllowed);
-        return Err(Failure::new(
-            StatusCode::FORBIDDEN,
-            "model_not_allowed",
-            format!("This API key may not use `{}`.", route.qualified),
-        ));
-    }
+    let route = route(state, key, requested).await?;
     check_inputs(&body, &route.capabilities, &route.qualified)?;
     clamp_effort(&mut body, &route.capabilities);
 
@@ -110,9 +76,47 @@ pub async fn prepare(
             stream,
             cache_key,
             reserved_tokens,
-            permits,
+            _permits: permits,
         },
     })
+}
+
+/// Finds the enabled model for a name and checks that the key may use it.
+pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Route, Failure> {
+    let route = match routing::resolve(&state.db, requested).await {
+        Ok(route) => route,
+        Err(RouteError::NotFound(name)) => {
+            return Err(Failure::new(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                format!("The model `{name}` does not exist or is not enabled."),
+            ));
+        }
+        Err(RouteError::Ambiguous(name, options)) => {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{name}` matches several models. Use one of: {}.", options.join(", ")),
+            ));
+        }
+        Err(RouteError::Db(err)) => {
+            tracing::error!(error = %err, "database error in routing");
+            return Err(Failure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Internal error.",
+            ));
+        }
+    };
+    if !routing::allowed(&key.allowlist, &route) {
+        state.rejected.count(super::rejected::Reason::NotAllowed);
+        return Err(Failure::new(
+            StatusCode::FORBIDDEN,
+            "model_not_allowed",
+            format!("This API key may not use `{}`.", route.qualified),
+        ));
+    }
+    Ok(route)
 }
 
 const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
@@ -146,13 +150,7 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
-const HOSTED_TOOLS: [&str; 5] = [
-    "function",
-    "custom",
-    "web_search",
-    "web_search_preview",
-    "image_generation",
-];
+const HOSTED_TOOLS: [&str; 4] = ["function", "custom", "web_search", "web_search_preview"];
 
 fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
     for tool in body["tools"].as_array().into_iter().flatten() {
@@ -161,7 +159,7 @@ fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
             return Err(Failure::new(
                 StatusCode::BAD_REQUEST,
                 "unsupported_tool",
-                format!("The tool type `{kind}` is not supported. Use function tools, web search or image generation."),
+                format!("The tool type `{kind}` is not supported. Use function tools or web search."),
             ));
         }
     }

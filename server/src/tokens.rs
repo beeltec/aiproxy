@@ -48,11 +48,15 @@ static SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 /// Estimates the input tokens of a request body off the async threads.
 pub async fn estimate(body: &Value) -> usize {
-    let _slot = SLOTS.acquire().await.expect("the estimate semaphore is never closed");
+    let slot = SLOTS.acquire().await.expect("the estimate semaphore is never closed");
     let body = body.clone();
-    tokio::task::spawn_blocking(move || count_request(&body))
-        .await
-        .unwrap_or(0)
+    // The slot moves into the task: a cancelled caller does not stop the task.
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        count_request(&body)
+    })
+    .await
+    .unwrap_or(0)
 }
 
 /// Estimates the input tokens of a request body: all text values, plus a fixed amount per image.

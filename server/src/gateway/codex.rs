@@ -92,6 +92,8 @@ pub enum SendError {
     Unauthorized,
     /// Usage limit reached; blocked until this unix time.
     UsageLimit { until: i64, message: String },
+    /// Short-term throttling: the account is not blocked.
+    Throttled { retry_after: Option<i64>, message: String },
     /// Any other failure, with the status to show the client.
     Failed { status: u16, message: String },
 }
@@ -166,11 +168,7 @@ pub fn classify(status: u16, body: &str, retry_after: Option<i64>) -> SendError 
     if status == 401 || matches!(kind, "invalid_api_key" | "token_expired" | "authentication_error") {
         return SendError::Unauthorized;
     }
-    if matches!(
-        kind,
-        "usage_limit_reached" | "usage_not_included" | "rate_limit_exceeded"
-    ) || status == 429
-    {
+    if matches!(kind, "usage_limit_reached" | "usage_not_included") {
         let now = crate::db::now();
         let until = error["resets_at"]
             .as_i64()
@@ -178,6 +176,9 @@ pub fn classify(status: u16, body: &str, retry_after: Option<i64>) -> SendError 
             .or_else(|| retry_after.map(|s| now + s))
             .unwrap_or(now + 3600);
         return SendError::UsageLimit { until, message };
+    }
+    if kind == "rate_limit_exceeded" || status == 429 {
+        return SendError::Throttled { retry_after, message };
     }
     SendError::Failed { status, message }
 }

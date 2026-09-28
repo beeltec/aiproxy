@@ -28,7 +28,7 @@ pub async fn create(
     };
     let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission.take()).await {
+    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };

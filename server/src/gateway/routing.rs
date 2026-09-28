@@ -65,12 +65,12 @@ pub async fn resolve(db: &SqlitePool, requested: &str) -> Result<Route, RouteErr
 }
 
 /// True when the key allows the route. An empty list allows all models. A pattern may match
-/// the name the client sent or the qualified name; `*` matches any text.
+/// the name the client sent, the qualified name or the upstream model id; `*` matches any text.
 pub fn allowed(patterns: &[String], route: &Route) -> bool {
     patterns.is_empty()
         || patterns
             .iter()
-            .any(|p| glob(p, &route.requested) || glob(p, &route.qualified))
+            .any(|p| glob(p, &route.requested) || glob(p, &route.qualified) || glob(p, &route.upstream_model))
 }
 
 fn glob(pattern: &str, text: &str) -> bool {

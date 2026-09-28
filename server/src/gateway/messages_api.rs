@@ -14,7 +14,9 @@ use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::error::{ErrorFormat, GatewayError};
 use super::{request, sse};
+use crate::db::now;
 use crate::state::AppState;
+use crate::usage::{Row, Tokens};
 
 /// OpenAI reasoning travels in the `signature` of an Anthropic thinking block with this prefix.
 /// Signatures without it come from Anthropic and are dropped.
@@ -34,8 +36,7 @@ pub async fn create(
     let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission.take()).await
-    {
+    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -55,12 +56,51 @@ pub async fn create(
     collect(rx, &requested, show_thinking).await
 }
 
-/// Local estimate: the Anthropic count needs an Anthropic model.
-pub async fn count_tokens(Json(body): Json<Value>) -> Response {
-    match to_responses(&body) {
-        Ok(converted) => Json(json!({ "input_tokens": crate::tokens::estimate(&converted).await })).into_response(),
-        Err(message) => error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
-    }
+/// Local estimate: the Anthropic count needs an Anthropic model. It uses no generation
+/// allowance, but it has a usage row with zero tokens.
+pub async fn count_tokens(
+    State(state): State<AppState>,
+    Extension(key): Extension<ApiKey>,
+    Json(body): Json<Value>,
+) -> Response {
+    let started = std::time::Instant::now();
+    let converted = match to_responses(&body) {
+        Ok(converted) => converted,
+        Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
+    };
+    let requested = body["model"].as_str().unwrap_or_default();
+    let route = match request::route(&state, &key, requested).await {
+        Ok(route) => route,
+        Err(failure) => return error(failure),
+    };
+    let input_tokens = crate::tokens::estimate(&converted).await;
+    state
+        .usage
+        .record(Row {
+            request_id: crate::crypto::random_token(12),
+            time: now(),
+            api_key_id: key.id,
+            route: "count_tokens",
+            client_format: "messages",
+            upstream: "local",
+            chatgpt_account_id: None,
+            requested_model: requested.to_owned(),
+            resolved_model: Some(route.qualified),
+            effort: None,
+            service_tier_requested: None,
+            service_tier_reported: None,
+            streamed: false,
+            status_code: 200,
+            error_kind: None,
+            latency_ms: started.elapsed().as_millis() as i64,
+            first_token_ms: None,
+            usage_status: "none",
+            tokens: Tokens::default(),
+            web_search_calls: 0,
+            failover_attempts: 0,
+        })
+        .await;
+    Json(json!({ "input_tokens": input_tokens })).into_response()
 }
 
 pub fn error(failure: Failure) -> Response {
@@ -192,7 +232,7 @@ fn reasoning(body: &Value) -> Option<Value> {
 fn tool(tool: &Value) -> Result<Value, String> {
     let kind = tool["type"].as_str().unwrap_or("custom");
     if kind.starts_with("web_search") {
-        return Ok(json!({ "type": "web_search" }));
+        return web_search_tool(tool);
     }
     if kind != "custom" {
         return Err(format!(
@@ -206,6 +246,29 @@ fn tool(tool: &Value) -> Result<Value, String> {
         "parameters": tool["input_schema"],
         "strict": tool["strict"].as_bool().unwrap_or(false),
     }))
+}
+
+/// The backend search can only be limited to domains; it cannot block domains. `max_uses` has
+/// no backend equivalent, so it is not applied.
+fn web_search_tool(tool: &Value) -> Result<Value, String> {
+    if tool["blocked_domains"].as_array().is_some_and(|list| !list.is_empty()) {
+        return Err("Web search with `blocked_domains` is not supported. Use `allowed_domains`.".into());
+    }
+    let mut out = json!({ "type": "web_search" });
+    if let Some(domains) = tool["allowed_domains"].as_array().filter(|list| !list.is_empty()) {
+        out["filters"] = json!({ "allowed_domains": domains });
+    }
+    if tool["user_location"].is_object() {
+        let location = &tool["user_location"];
+        out["user_location"] = json!({
+            "type": "approximate",
+            "city": location["city"],
+            "region": location["region"],
+            "country": location["country"],
+            "timezone": location["timezone"],
+        });
+    }
+    Ok(out)
 }
 
 /// A user message can hold tool results and new content. Tool results become their own items,

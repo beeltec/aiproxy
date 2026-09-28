@@ -62,7 +62,7 @@ async fn list_models(State(state): State<AppState>, Extension(key): Extension<Ap
         .into_iter()
         .map(|(model_id, source, upstream_id, display_name, capabilities)| {
             let route = Route {
-                requested: upstream_id.clone(),
+                requested: format!("{source}/{upstream_id}"),
                 qualified: format!("{source}/{upstream_id}"),
                 upstream_model: upstream_id.clone(),
                 model_id,
