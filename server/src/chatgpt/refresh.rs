@@ -162,14 +162,19 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
     if let Some(result) = state.refresher.result_after(account, seen) {
         return result;
     }
-    let result = attempt(state, account, trigger).await;
-    state.refresher.record(account, &result);
+    let (result, contacted) = attempt(state, account, trigger).await;
+    // Only real attempts are shared; a skipped call (fresh token, cooldown) says nothing new.
+    if contacted {
+        state.refresher.record(account, &result);
+    }
     result
 }
 
 /// One refresh attempt. The caller holds the account lock.
-async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
-    let row: Option<RefreshRow> = sqlx::query_as(
+/// Returns the result and whether the sign-in server was contacted.
+async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> (Result<(), Failure>, bool) {
+    let skipped = |result| (result, false);
+    let row: Result<Option<RefreshRow>, Failure> = sqlx::query_as(
         "SELECT chatgpt_account_id, refresh_token_enc, credential_generation, last_refresh_at,
              last_refresh_failed_at, status
          FROM chatgpt_accounts WHERE id = ?",
@@ -177,7 +182,11 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
     .bind(account)
     .fetch_optional(&state.db)
     .await
-    .map_err(db_failure)?;
+    .map_err(db_failure);
+    let row = match row {
+        Ok(row) => row,
+        Err(err) => return skipped(Err(err)),
+    };
     let Some(RefreshRow {
         chatgpt_account_id: chatgpt_id,
         refresh_token_enc: refresh_enc,
@@ -187,10 +196,12 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
         status,
     }) = row
     else {
-        return Err(Failure::NeedsRelogin("the account does not exist".into()));
+        return skipped(Err(Failure::NeedsRelogin("the account does not exist".into())));
     };
     if status == "needs_relogin" {
-        return Err(Failure::NeedsRelogin("the refresh token does not work any more".into()));
+        return skipped(Err(Failure::NeedsRelogin(
+            "the refresh token does not work any more".into(),
+        )));
     }
     if trigger == Trigger::Scheduled
         && state
@@ -202,14 +213,16 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
             .map(|r| r.0)
             == Some(generation)
     {
-        return Err(Failure::Temporary("retries after a failed refresh are running".into()));
+        return skipped(Err(Failure::Temporary(
+            "retries after a failed refresh are running".into(),
+        )));
     }
     let now = now();
     if trigger != Trigger::Manual && now - last_refresh_at < FRESH_SECS {
-        return Ok(());
+        return skipped(Ok(()));
     }
     if trigger == Trigger::Request && last_failed_at.is_some_and(|at| now - at < COOLDOWN_SECS) {
-        return Err(Failure::Temporary("the last refresh failed a moment ago".into()));
+        return skipped(Err(Failure::Temporary("the last refresh failed a moment ago".into())));
     }
 
     let refresh_token = state
@@ -217,7 +230,11 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
         .decrypt(&aad(&chatgpt_id, "refresh_token"), &refresh_enc)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .ok_or_else(|| Failure::NeedsRelogin("the stored refresh token cannot be read".into()))?;
+        .ok_or_else(|| Failure::NeedsRelogin("the stored refresh token cannot be read".into()));
+    let refresh_token = match refresh_token {
+        Ok(token) => token,
+        Err(err) => return skipped(Err(err)),
+    };
     let timeout = if trigger == Trigger::Request {
         REQUEST_TIMEOUT
     } else {
@@ -227,7 +244,7 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
     let result = oauth::refresh(&state.http, &refresh_token, timeout).await;
     // The end time, so callers that waited during the request see this result.
     let now = crate::db::now();
-    match result {
+    let outcome = match result {
         Ok(tokens) => {
             let enc = |field: &str, value: &str| state.secrets.encrypt(&aad(&chatgpt_id, field), value.as_bytes());
             let access = enc("access_token", &tokens.access_token);
@@ -261,7 +278,7 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
                         tracing::warn!(account, error = %err, attempt, "cannot save refreshed tokens, trying again");
                         tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
                     }
-                    Err(err) => return Err(db_failure(err)),
+                    Err(err) => return (Err(db_failure(err)), true),
                 }
             }
             tracing::info!(account, ?trigger, "ChatGPT token refreshed");
@@ -272,7 +289,7 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
             Ok(())
         }
         Err(RefreshError::Permanent(message)) => {
-            sqlx::query(
+            let updated = sqlx::query(
                 "UPDATE chatgpt_accounts SET status = 'needs_relogin', last_refresh_error = ?, last_refresh_failed_at = ?
                  WHERE id = ? AND credential_generation = ?",
             )
@@ -282,12 +299,15 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
             .bind(generation)
             .execute(&state.db)
             .await
-            .map_err(db_failure)?;
+            .map_err(db_failure);
+            if let Err(err) = updated {
+                return (Err(err), true);
+            }
             tracing::warn!(account, %message, "ChatGPT account needs a new login");
             Err(Failure::NeedsRelogin(message))
         }
         Err(RefreshError::Temporary(message)) => {
-            sqlx::query(
+            let updated = sqlx::query(
                 "UPDATE chatgpt_accounts SET last_refresh_error = ?, last_refresh_failed_at = ?
                  WHERE id = ? AND credential_generation = ?",
             )
@@ -297,14 +317,18 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(),
             .bind(generation)
             .execute(&state.db)
             .await
-            .map_err(db_failure)?;
+            .map_err(db_failure);
+            if let Err(err) = updated {
+                return (Err(err), true);
+            }
             tracing::warn!(account, %message, "ChatGPT token refresh failed");
             if trigger != Trigger::Retry {
                 start_retries(state, account, generation);
             }
             Err(Failure::Temporary(message))
         }
-    }
+    };
+    (outcome, true)
 }
 
 /// Tries again after 30 s, 2 min and 10 min, once per account at a time. The sequence stops
