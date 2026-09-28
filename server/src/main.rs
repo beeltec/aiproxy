@@ -90,6 +90,13 @@ async fn serve() -> anyhow::Result<()> {
         result = server.into_future() => result?,
         () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
     }
+    // A refresh that is running must save its rotated token before the process ends.
+    if tokio::time::timeout(SHUTDOWN_GRACE, state.refresher.drain())
+        .await
+        .is_err()
+    {
+        tracing::warn!("token refreshes did not end in time");
+    }
     state.rejected.flush(&state.db).await;
     tracing::info!("aiproxy stopped");
     Ok(())

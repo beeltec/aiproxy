@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 
 use super::accounts::aad;
 use super::oauth::{self, RefreshError};
@@ -29,8 +31,14 @@ const RETRY_DELAYS: [Duration; 3] = [
 #[derive(Default)]
 pub struct Refresher {
     locks: Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
-    /// Accounts with a running retry sequence, and the credential generation it is for.
-    retrying: Mutex<HashMap<i64, i64>>,
+    /// Accounts with a running retry sequence: the credential generation it is for and the id of
+    /// the sequence.
+    retrying: Mutex<HashMap<i64, (i64, u64)>>,
+    next_sequence: AtomicU64,
+    /// Refreshes that run now. Shutdown waits for them, so a rotated token is always saved.
+    running: AtomicUsize,
+    idle: Notify,
+    stopping: AtomicBool,
 }
 
 /// Why the refresh runs.
@@ -82,10 +90,40 @@ struct RefreshRow {
 /// Refreshes the tokens of an account. The work runs in its own task: when the caller goes away
 /// (for example a closed browser), the rotated token is still saved.
 pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
+    let refresher = &state.refresher;
+    refresher.running.fetch_add(1, Ordering::SeqCst);
+    if refresher.stopping.load(Ordering::SeqCst) {
+        refresher.finish_one();
+        return Err(Failure::Temporary("the server is stopping".into()));
+    }
     let state = state.clone();
-    tokio::spawn(async move { refresh_now(&state, account, trigger).await })
-        .await
-        .unwrap_or_else(|_| Err(Failure::Temporary("the refresh task stopped".into())))
+    tokio::spawn(async move {
+        let result = refresh_now(&state, account, trigger).await;
+        state.refresher.finish_one();
+        result
+    })
+    .await
+    .unwrap_or_else(|_| Err(Failure::Temporary("the refresh task stopped".into())))
+}
+
+impl Refresher {
+    fn finish_one(&self) {
+        if self.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.idle.notify_waiters();
+        }
+    }
+
+    /// For shutdown: starts no new refreshes and waits until the running ones ended.
+    pub async fn drain(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        loop {
+            let idle = self.idle.notified();
+            if self.running.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            idle.await;
+        }
+    }
 }
 
 async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
@@ -132,7 +170,14 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
         ));
     }
     if trigger == Trigger::Scheduled
-        && state.refresher.retrying.lock().expect("retrying").get(&account) == Some(&generation)
+        && state
+            .refresher
+            .retrying
+            .lock()
+            .expect("retrying")
+            .get(&account)
+            .map(|r| r.0)
+            == Some(generation)
     {
         return Err(Failure::Temporary("retries after a failed refresh are running".into()));
     }
@@ -197,6 +242,10 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
                 }
             }
             tracing::info!(account, ?trigger, "ChatGPT token refreshed");
+            // A success ends a running retry sequence; a later failure starts a new one.
+            if trigger != Trigger::Retry {
+                state.refresher.retrying.lock().expect("retrying").remove(&account);
+            }
             Ok(())
         }
         Err(RefreshError::Permanent(message)) => {
@@ -239,12 +288,13 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
 /// Tries again after 30 s, 2 min and 10 min, once per account at a time. The sequence stops
 /// when the credentials change (re-link).
 fn start_retries(state: &AppState, account: i64, generation: i64) {
+    let sequence = state.refresher.next_sequence.fetch_add(1, Ordering::SeqCst);
     {
         let mut retrying = state.refresher.retrying.lock().expect("retrying");
-        if retrying.get(&account) == Some(&generation) {
+        if retrying.get(&account).map(|r| r.0) == Some(generation) {
             return;
         }
-        retrying.insert(account, generation);
+        retrying.insert(account, (generation, sequence));
     }
     let started = now();
     let state = state.clone();
@@ -283,7 +333,7 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
             give_up(&state, account, generation).await;
         }
         let mut retrying = state.refresher.retrying.lock().expect("retrying");
-        if retrying.get(&account) == Some(&generation) {
+        if retrying.get(&account).map(|r| r.1) == Some(sequence) {
             retrying.remove(&account);
         }
     });
