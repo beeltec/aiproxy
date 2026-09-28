@@ -133,6 +133,8 @@ pub(super) struct Outcome {
     pub web_search_calls: i64,
     /// True after an upstream accepted the request, so tokens can be used.
     pub generation_started: bool,
+    /// The upstream format of a native stream: its errors go out in that format.
+    pub native_wire: Option<provider::Wire>,
 }
 
 async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failure>>, tx: mpsc::Sender<Msg>) {
@@ -178,7 +180,19 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
                 let _ = opened.send(Err(failure));
             }
             None => {
-                let _ = tokio::time::timeout(ERROR_SEND_TIMEOUT, tx.send(Msg::Failed(failure))).await;
+                let send = async {
+                    match outcome.native_wire {
+                        Some(wire) => {
+                            for frame in provider::native_error(wire, &failure) {
+                                let _ = tx.send(Msg::Raw(frame)).await;
+                            }
+                        }
+                        None => {
+                            let _ = tx.send(Msg::Failed(failure)).await;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(ERROR_SEND_TIMEOUT, send).await;
             }
         }
     }

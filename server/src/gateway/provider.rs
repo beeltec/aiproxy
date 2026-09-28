@@ -173,18 +173,9 @@ pub(super) async fn attempt(
         return Ok(());
     }
     if native {
-        return match native_stream(response, wire, job, ttl.as_deref(), tx, outcome, started).await {
-            // The client already has native frames, so the error goes out in the upstream format.
-            Err(failure) if failure.code != super::engine::CLIENT_CLOSED => {
-                outcome.status = failure.status.as_u16();
-                outcome.error_kind = Some(failure.code.to_owned());
-                for frame in native_error(wire, &failure) {
-                    let _ = tx.send(Msg::Raw(frame)).await;
-                }
-                Ok(())
-            }
-            other => other,
-        };
+        // From now on the client has native frames; a late error must use the native format.
+        outcome.native_wire = Some(wire);
+        return native_stream(response, wire, job, ttl.as_deref(), tx, outcome, started).await;
     }
 
     let mut decoder: Box<dyn Decoder> = match wire {
@@ -213,6 +204,8 @@ pub(super) async fn attempt(
             Ok(None) => {
                 // A paused Anthropic answer continues with its content as the assistant turn,
                 // within the output limit that is left.
+                // The usage of the answers so far is kept, also if the continuation fails.
+                outcome.tokens = decoder.tokens();
                 let left = client_max.map(|max| max - decoder.output_tokens());
                 let content = (continuations < MAX_CONTINUATIONS && left.is_none_or(|l| l > 0))
                     .then(|| decoder.continuation())
@@ -392,7 +385,7 @@ async fn send(
 }
 
 /// A stream error event in the format of the upstream.
-fn native_error(wire: Wire, failure: &Failure) -> Vec<bytes::Bytes> {
+pub(super) fn native_error(wire: Wire, failure: &Failure) -> Vec<bytes::Bytes> {
     match wire {
         Wire::Responses => {
             let data = json!({ "type": "error", "code": failure.code, "message": failure.message });
@@ -559,7 +552,7 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
         }
     }
     // OpenRouter fallbacks and provider routing would pick models that the key may not use.
-    for field in ["models", "provider"] {
+    for field in ["models", "provider", "preset"] {
         if kind == Kind::OpenRouter && !body[field].is_null() {
             return Err(Failure::new(
                 StatusCode::BAD_REQUEST,
@@ -567,6 +560,18 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
                 format!("`{field}` is not supported: it would skip the model list of the key."),
             ));
         }
+    }
+    // OpenRouter plugins are hosted tools; only its web search is allowed.
+    let mut plugins = body["plugins"].as_array().into_iter().flatten();
+    if let Some(plugin) = plugins.find(|p| p["id"] != "web") {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            format!(
+                "The plugin `{}` is not supported. Only `web` is allowed.",
+                plugin["id"].as_str().unwrap_or_default()
+            ),
+        ));
     }
     // The prepared body has the alias defaults and the effort that the model supports.
     let effort = job.body["reasoning"]["effort"].as_str();
