@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod db;
 mod error;
+mod gateway;
 mod rate_limit;
 mod state;
 mod web_assets;
@@ -59,7 +60,11 @@ async fn serve() -> anyhow::Result<()> {
     let db = db::open(&config.data_dir).await?;
     let bind = config.bind;
     let public_origin = config.public_origin();
-    let app = router(AppState::new(config, db)?, WebAssets::new());
+    let state = AppState::new(config, db)?;
+    let rejected = state.rejected.clone();
+    let rejected_db = state.db.clone();
+    tokio::spawn(async move { rejected.run(rejected_db).await });
+    let app = router(state.clone(), WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("cannot bind {bind}"))?;
@@ -82,6 +87,7 @@ async fn serve() -> anyhow::Result<()> {
         result = server.into_future() => result?,
         () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
     }
+    state.rejected.flush(&state.db).await;
     tracing::info!("aiproxy stopped");
     Ok(())
 }
@@ -89,8 +95,11 @@ async fn serve() -> anyhow::Result<()> {
 fn router(state: AppState, assets: WebAssets) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .nest(admin::PREFIX, admin::router(state.clone()))
-        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .nest(
+            admin::PREFIX,
+            admin::router(state.clone()).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .nest(gateway::PREFIX, gateway::router(state.clone()))
         .fallback(move |uri: Uri| {
             let assets = assets.clone();
             async move { assets.serve(&uri) }

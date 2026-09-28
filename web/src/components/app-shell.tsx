@@ -3,6 +3,7 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
 	ChevronsUpDownIcon,
 	GaugeIcon,
+	KeyRoundIcon,
 	LogOutIcon,
 	ShieldCheckIcon,
 	UsersIcon,
@@ -19,7 +20,7 @@ import { api, call, errorMessage } from "#/lib/api/client";
 import { meQuery } from "#/lib/session";
 
 type NavItem = {
-	to: "/" | "/admins" | "/security";
+	to: "/" | "/api-keys" | "/admins" | "/security";
 	label: string;
 	icon: React.ComponentType<{ className?: string }>;
 };
@@ -28,6 +29,10 @@ const NAV: { group: string; items: NavItem[] }[] = [
 	{
 		group: "Monitor",
 		items: [{ to: "/", label: "Overview", icon: GaugeIcon }],
+	},
+	{
+		group: "Gateway",
+		items: [{ to: "/api-keys", label: "API keys", icon: KeyRoundIcon }],
 	},
 	{
 		group: "Instance",

@@ -2,6 +2,7 @@
 
 mod account;
 mod admins;
+mod api_keys;
 pub mod auth;
 mod factors;
 mod passkeys;
@@ -36,6 +37,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(account::router())
         .merge(factors::router())
         .merge(passkeys::router())
+        .merge(api_keys::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

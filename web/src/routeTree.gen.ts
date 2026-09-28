@@ -14,6 +14,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as SetupRouteImport } from './routes/setup'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAdminsRouteImport } from './routes/_app/admins'
+import { Route as AppApiKeysRouteImport } from './routes/_app/api-keys'
 import { Route as AppSecurityRouteImport } from './routes/_app/security'
 
 const AppRoute = AppRouteImport.update({
@@ -40,6 +41,11 @@ const AppAdminsRoute = AppAdminsRouteImport.update({
   path: '/admins',
   getParentRoute: () => AppRoute,
 } as any)
+const AppApiKeysRoute = AppApiKeysRouteImport.update({
+  id: '/api-keys',
+  path: '/api-keys',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSecurityRoute = AppSecurityRouteImport.update({
   id: '/security',
   path: '/security',
@@ -51,12 +57,14 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/admins': typeof AppAdminsRoute
+  '/api-keys': typeof AppApiKeysRoute
   '/security': typeof AppSecurityRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/admins': typeof AppAdminsRoute
+  '/api-keys': typeof AppApiKeysRoute
   '/security': typeof AppSecurityRoute
   '/': typeof AppIndexRoute
 }
@@ -66,20 +74,22 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/_app/admins': typeof AppAdminsRoute
+  '/_app/api-keys': typeof AppApiKeysRoute
   '/_app/security': typeof AppSecurityRoute
   '/_app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/setup' | '/admins' | '/security'
+  fullPaths: '/' | '/login' | '/setup' | '/admins' | '/api-keys' | '/security'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/setup' | '/admins' | '/security' | '/'
+  to: '/login' | '/setup' | '/admins' | '/api-keys' | '/security' | '/'
   id:
     | '__root__'
     | '/_app'
     | '/login'
     | '/setup'
     | '/_app/admins'
+    | '/_app/api-keys'
     | '/_app/security'
     | '/_app/'
   fileRoutesById: FileRoutesById
@@ -127,6 +137,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAdminsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/api-keys': {
+      id: '/_app/api-keys'
+      path: '/api-keys'
+      fullPath: '/api-keys'
+      preLoaderRoute: typeof AppApiKeysRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/security': {
       id: '/_app/security'
       path: '/security'
@@ -139,12 +156,14 @@ declare module '@tanstack/react-router' {
 
 interface AppRouteChildren {
   AppAdminsRoute: typeof AppAdminsRoute
+  AppApiKeysRoute: typeof AppApiKeysRoute
   AppSecurityRoute: typeof AppSecurityRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppAdminsRoute: AppAdminsRoute,
+  AppApiKeysRoute: AppApiKeysRoute,
   AppSecurityRoute: AppSecurityRoute,
   AppIndexRoute: AppIndexRoute,
 }

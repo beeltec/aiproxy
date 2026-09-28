@@ -9,6 +9,7 @@ use crate::admin::Ceremonies;
 use crate::client_ip::TrustedProxies;
 use crate::config::Config;
 use crate::crypto::{PasswordHasher, SecretBox};
+use crate::gateway::{KeyLimits, RejectedCounter};
 use crate::rate_limit::SlidingWindow;
 
 #[derive(Clone)]
@@ -21,6 +22,8 @@ pub struct AppState {
     /// `None` when the public URL has no host name (passkeys need one).
     pub webauthn: Option<Arc<Webauthn>>,
     pub ceremonies: Arc<Ceremonies>,
+    pub key_limits: Arc<KeyLimits>,
+    pub rejected: Arc<RejectedCounter>,
 }
 
 /// Limits for login and setup attempts.
@@ -38,6 +41,8 @@ impl AppState {
             secrets: SecretBox::new(&config.master_key),
             webauthn: webauthn.map(Arc::new),
             ceremonies: Arc::default(),
+            key_limits: Arc::default(),
+            rejected: Arc::default(),
             config: Arc::new(config),
             db,
             hasher: PasswordHasher::new(),
