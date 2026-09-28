@@ -1,0 +1,14 @@
+/target
+/server/target
+node_modules
+/web/dist
+/web/.output
+/web/.tanstack
+/web/.vinxi
+/data
+.env
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.playwright-cli
