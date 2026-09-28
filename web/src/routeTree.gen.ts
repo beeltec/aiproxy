@@ -16,6 +16,8 @@ import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAdminsRouteImport } from './routes/_app/admins'
 import { Route as AppApiKeysRouteImport } from './routes/_app/api-keys'
 import { Route as AppSecurityRouteImport } from './routes/_app/security'
+import { Route as AppSettingsRouteImport } from './routes/_app/settings'
+import { Route as AppSubscriptionsRouteImport } from './routes/_app/subscriptions'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -51,6 +53,16 @@ const AppSecurityRoute = AppSecurityRouteImport.update({
   path: '/security',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSubscriptionsRoute = AppSubscriptionsRouteImport.update({
+  id: '/subscriptions',
+  path: '/subscriptions',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -59,6 +71,8 @@ export interface FileRoutesByFullPath {
   '/admins': typeof AppAdminsRoute
   '/api-keys': typeof AppApiKeysRoute
   '/security': typeof AppSecurityRoute
+  '/settings': typeof AppSettingsRoute
+  '/subscriptions': typeof AppSubscriptionsRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -66,6 +80,8 @@ export interface FileRoutesByTo {
   '/admins': typeof AppAdminsRoute
   '/api-keys': typeof AppApiKeysRoute
   '/security': typeof AppSecurityRoute
+  '/settings': typeof AppSettingsRoute
+  '/subscriptions': typeof AppSubscriptionsRoute
   '/': typeof AppIndexRoute
 }
 export interface FileRoutesById {
@@ -76,13 +92,31 @@ export interface FileRoutesById {
   '/_app/admins': typeof AppAdminsRoute
   '/_app/api-keys': typeof AppApiKeysRoute
   '/_app/security': typeof AppSecurityRoute
+  '/_app/settings': typeof AppSettingsRoute
+  '/_app/subscriptions': typeof AppSubscriptionsRoute
   '/_app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/setup' | '/admins' | '/api-keys' | '/security'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/setup'
+    | '/admins'
+    | '/api-keys'
+    | '/security'
+    | '/settings'
+    | '/subscriptions'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/setup' | '/admins' | '/api-keys' | '/security' | '/'
+  to:
+    | '/login'
+    | '/setup'
+    | '/admins'
+    | '/api-keys'
+    | '/security'
+    | '/settings'
+    | '/subscriptions'
+    | '/'
   id:
     | '__root__'
     | '/_app'
@@ -91,6 +125,8 @@ export interface FileRouteTypes {
     | '/_app/admins'
     | '/_app/api-keys'
     | '/_app/security'
+    | '/_app/settings'
+    | '/_app/subscriptions'
     | '/_app/'
   fileRoutesById: FileRoutesById
 }
@@ -151,6 +187,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSecurityRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/settings': {
+      id: '/_app/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/subscriptions': {
+      id: '/_app/subscriptions'
+      path: '/subscriptions'
+      fullPath: '/subscriptions'
+      preLoaderRoute: typeof AppSubscriptionsRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -158,6 +208,8 @@ interface AppRouteChildren {
   AppAdminsRoute: typeof AppAdminsRoute
   AppApiKeysRoute: typeof AppApiKeysRoute
   AppSecurityRoute: typeof AppSecurityRoute
+  AppSettingsRoute: typeof AppSettingsRoute
+  AppSubscriptionsRoute: typeof AppSubscriptionsRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
@@ -165,6 +217,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppAdminsRoute: AppAdminsRoute,
   AppApiKeysRoute: AppApiKeysRoute,
   AppSecurityRoute: AppSecurityRoute,
+  AppSettingsRoute: AppSettingsRoute,
+  AppSubscriptionsRoute: AppSubscriptionsRoute,
   AppIndexRoute: AppIndexRoute,
 }
 

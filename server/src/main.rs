@@ -1,4 +1,5 @@
 mod admin;
+mod chatgpt;
 mod client_ip;
 mod config;
 mod crypto;
@@ -6,6 +7,7 @@ mod db;
 mod error;
 mod gateway;
 mod rate_limit;
+mod settings;
 mod state;
 mod web_assets;
 
@@ -64,6 +66,7 @@ async fn serve() -> anyhow::Result<()> {
     let rejected = state.rejected.clone();
     let rejected_db = state.db.clone();
     tokio::spawn(async move { rejected.run(rejected_db).await });
+    tokio::spawn(chatgpt::scheduler::run(state.clone()));
     let app = router(state.clone(), WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await

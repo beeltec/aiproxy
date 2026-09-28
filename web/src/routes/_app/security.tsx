@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { PageHeader } from "#/components/page-header";
 import { factorsQuery, SecondFactors } from "#/components/second-factors";
+import { Section } from "#/components/section";
 import { TextField } from "#/components/text-field";
 import { Badge } from "#/components/ui/badge";
 import { Button } from "#/components/ui/button";
@@ -66,26 +67,6 @@ function SecurityPage() {
 				<SessionsTable />
 			</Section>
 		</div>
-	);
-}
-
-function Section({
-	title,
-	description,
-	children,
-}: {
-	title: string;
-	description: string;
-	children: React.ReactNode;
-}) {
-	return (
-		<section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:gap-10">
-			<div className="space-y-1">
-				<h2 className="font-semibold">{title}</h2>
-				<p className="text-sm text-muted-foreground">{description}</p>
-			</div>
-			<div className="min-w-0">{children}</div>
-		</section>
 	);
 }
 

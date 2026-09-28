@@ -40,6 +40,12 @@ docker exec aiproxy aiproxy setup-token   # or: cargo run -- setup-token
 
 The token is valid for one hour. The command prints it to its own output, not to the server log.
 
+## ChatGPT subscriptions
+
+Link accounts on the Subscriptions page. The default is the device code: the dashboard shows a code that you enter at https://auth.openai.com/codex/device (device login must be allowed in the ChatGPT security settings). The other way is a browser sign-in: at the end the browser opens `http://127.0.0.1:1455/auth/callback?...` and shows an error; paste that address into the dashboard.
+
+The gateway renews the tokens on a cron plan (Settings page, default `0 0 * * *` in the instance time zone) and when a request needs it. Each account can use its own plan or none. OpenAI does not officially support the use of a subscription outside its own apps. Use it at your own risk.
+
 ## Second factors
 
 Each admin can add an authenticator app (TOTP) and passkeys on the Security page. With a second factor, a password alone does not log in. A passkey can also log in without a password. The first second factor gives 10 one-time recovery codes. An admin who lost all factors can get a reset from another admin (Admins page).
