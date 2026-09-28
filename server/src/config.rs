@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use url::Url;
 
+use crate::client_ip::TrustedProxies;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub public_url: Url,
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl Config {
@@ -28,10 +31,13 @@ impl Config {
             .unwrap_or_else(|| "/data".to_owned())
             .into();
 
+        let trusted_proxies = TrustedProxies::parse(&optional("AIPROXY_TRUSTED_PROXIES").unwrap_or_default())?;
+
         Ok(Self {
             public_url,
             bind,
             data_dir,
+            trusted_proxies,
         })
     }
 

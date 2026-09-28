@@ -1,4 +1,11 @@
+mod admin;
+mod client_ip;
 mod config;
+mod crypto;
+mod db;
+mod error;
+mod rate_limit;
+mod state;
 mod web_assets;
 
 use std::future::IntoFuture;
@@ -7,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Uri};
 use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +24,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
+use crate::state::AppState;
 use crate::web_assets::WebAssets;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
@@ -25,7 +34,12 @@ async fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         None | Some("serve") => serve().await,
         Some("healthcheck") => healthcheck().await,
-        Some(other) => anyhow::bail!("unknown command `{other}` (use `serve` or `healthcheck`)"),
+        Some("setup-token") => setup_token().await,
+        Some("openapi") => {
+            println!("{}", admin::openapi_json());
+            Ok(())
+        }
+        Some(other) => anyhow::bail!("unknown command `{other}` (use serve, healthcheck, setup-token or openapi)"),
     }
 }
 
@@ -38,13 +52,17 @@ async fn serve() -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("cannot create data dir {}", config.data_dir.display()))?;
 
-    let app = router(WebAssets::new());
-    let listener = TcpListener::bind(config.bind)
+    let db = db::open(&config.data_dir).await?;
+    let bind = config.bind;
+    let public_origin = config.public_origin();
+    let app = router(AppState::new(config, db), WebAssets::new());
+    let listener = TcpListener::bind(bind)
         .await
-        .with_context(|| format!("cannot bind {}", config.bind))?;
-    tracing::info!(bind = %config.bind, public_url = %config.public_origin(), "aiproxy started");
+        .with_context(|| format!("cannot bind {bind}"))?;
+    tracing::info!(%bind, public_url = %public_origin, "aiproxy started");
 
     let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel();
+    let app = app.into_make_service_with_connect_info::<SocketAddr>();
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_signal().await;
         let _ = signalled_tx.send(());
@@ -64,9 +82,11 @@ async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn router(assets: WebAssets) -> Router {
+fn router(state: AppState, assets: WebAssets) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .nest(admin::PREFIX, admin::router(state.clone()))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .fallback(move |uri: Uri| {
             let assets = assets.clone();
             async move { assets.serve(&uri) }
@@ -75,6 +95,7 @@ fn router(assets: WebAssets) -> Router {
         .layer(header("referrer-policy", "same-origin"))
         .layer(header("x-frame-options", "DENY"))
         .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 fn header(name: &'static str, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
@@ -100,6 +121,16 @@ async fn shutdown_signal() {
         () = terminate => {},
     }
     tracing::info!("shutdown signal received");
+}
+
+/// Creates the one-time token for the first admin and prints it to stdout (not to the server log).
+async fn setup_token() -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let db = db::open(&config.data_dir).await?;
+    let token = admin::auth::create_setup_token(&db).await?;
+    println!("Setup token (valid for 1 hour): {token}");
+    println!("Open {}/setup and enter the token.", config.public_origin());
+    Ok(())
 }
 
 /// Container health check. The runtime image has no shell or curl, so the binary checks itself.
