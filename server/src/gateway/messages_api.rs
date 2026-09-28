@@ -448,6 +448,30 @@ fn thinking_block(item: &Value, show: bool) -> Option<Value> {
     Some(json!({ "type": "thinking", "thinking": text, "signature": format!("{SIGNATURE_PREFIX}{encrypted}") }))
 }
 
+/// A URL citation of a web search answer as an Anthropic citation. The cited text is known only
+/// when the full text is.
+fn citation(annotation: &Value, text: Option<&str>) -> Option<Value> {
+    if annotation["type"] != "url_citation" {
+        return None;
+    }
+    let cited = text
+        .zip(annotation["start_index"].as_u64().zip(annotation["end_index"].as_u64()))
+        .map(|(text, (start, end))| {
+            text.chars()
+                .skip(start as usize)
+                .take(end.saturating_sub(start) as usize)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    Some(json!({
+        "type": "web_search_result_location",
+        "url": annotation["url"],
+        "title": annotation["title"],
+        "cited_text": cited,
+        "encrypted_index": "",
+    }))
+}
+
 /// Web search as the Anthropic server tool blocks.
 fn web_search_blocks(item: &Value) -> [Value; 2] {
     let id = format!("srvtoolu_{}", item["id"].as_str().unwrap_or_default());
@@ -472,7 +496,17 @@ pub fn from_response(response: &Value, model: &str, show_thinking: bool) -> Valu
             "message" => {
                 for part in item["content"].as_array().into_iter().flatten() {
                     if let Some(text) = part["text"].as_str().or_else(|| part["refusal"].as_str()) {
-                        content.push(json!({ "type": "text", "text": text }));
+                        let citations: Vec<Value> = part["annotations"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|a| citation(a, Some(text)))
+                            .collect();
+                        let mut block = json!({ "type": "text", "text": text });
+                        if !citations.is_empty() {
+                            block["citations"] = Value::Array(citations);
+                        }
+                        content.push(block);
                     }
                 }
             }
@@ -648,6 +682,13 @@ impl EventEncoder {
             "response.output_text.delta" | "response.refusal.delta" => {
                 if let Some(index) = self.open.get(&item_id).copied() {
                     Self::delta(out, index, json!({ "type": "text_delta", "text": data["delta"] }));
+                }
+            }
+            "response.output_text.annotation.added" => {
+                if let (Some(index), Some(citation)) =
+                    (self.open.get(&item_id).copied(), citation(&data["annotation"], None))
+                {
+                    Self::delta(out, index, json!({ "type": "citations_delta", "citation": citation }));
                 }
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {

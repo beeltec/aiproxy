@@ -240,12 +240,24 @@ pub fn from_response(response: &Value, model: &str) -> Value {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut refusal = String::new();
+    let mut annotations = Vec::new();
     let mut tool_calls = Vec::new();
     for item in response["output"].as_array().into_iter().flatten() {
         match item["type"].as_str().unwrap_or_default() {
             "message" => {
                 for part in item["content"].as_array().into_iter().flatten() {
                     if let Some(t) = part["text"].as_str() {
+                        // Chat indexes count from the start of the full message text.
+                        let offset = text.chars().count() as u64;
+                        for a in part["annotations"].as_array().into_iter().flatten() {
+                            if a["type"] == "url_citation" {
+                                let index = |field: &str| a[field].as_u64().map(|i| i + offset);
+                                annotations.push(json!({ "type": "url_citation", "url_citation": {
+                                    "url": a["url"], "title": a["title"],
+                                    "start_index": index("start_index"), "end_index": index("end_index"),
+                                } }));
+                            }
+                        }
                         text.push_str(t);
                     }
                     if let Some(t) = part["refusal"].as_str() {
@@ -274,6 +286,9 @@ pub fn from_response(response: &Value, model: &str) -> Value {
     }
     if !refusal.is_empty() {
         message["refusal"] = json!(refusal);
+    }
+    if !annotations.is_empty() {
+        message["annotations"] = Value::Array(annotations);
     }
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls.clone());

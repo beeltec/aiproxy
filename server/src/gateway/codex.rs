@@ -47,7 +47,7 @@ pub fn backend_body(request: &Value, upstream_model: &str, cache_key: &str) -> V
     {
         body.remove("instructions");
     }
-    // The backend needs the field; an empty text is not accepted.
+    // The backend accepts a request without instructions, but it refuses an empty text.
 
     body.entry("tools").or_insert_with(|| json!([]));
     body.entry("tool_choice").or_insert_with(|| json!("auto"));
@@ -59,8 +59,20 @@ pub fn backend_body(request: &Value, upstream_model: &str, cache_key: &str) -> V
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !include.iter().any(|v| v == "reasoning.encrypted_content") {
-        include.push(json!("reasoning.encrypted_content"));
+    let mut wanted = vec!["reasoning.encrypted_content"];
+    // Without this, the backend does not return the pages that a web search found.
+    let searches = body.get("tools").and_then(Value::as_array).is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|t| t["type"].as_str().is_some_and(|k| k.starts_with("web_search")))
+    });
+    if searches {
+        wanted.push("web_search_call.action.sources");
+    }
+    for value in wanted {
+        if !include.iter().any(|v| v == value) {
+            include.push(json!(value));
+        }
     }
     body.insert("include".into(), Value::Array(include));
     body.entry("prompt_cache_key").or_insert_with(|| json!(cache_key));

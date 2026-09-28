@@ -59,31 +59,33 @@ pub async fn estimate(body: &Value) -> usize {
     .unwrap_or(0)
 }
 
-/// Estimates the input tokens of a request body: all text values, plus a fixed amount per image.
+/// Estimates the input tokens of a request body: all text values, plus a fixed amount per image
+/// content part.
 fn count_request(body: &Value) -> usize {
     let mut text = String::new();
     let mut images = 0;
-    collect(body, &mut text, &mut images);
+    collect(body, false, &mut text, &mut images);
     count_text(&text) + images * IMAGE_TOKENS
 }
 
-fn collect(value: &Value, text: &mut String, images: &mut usize) {
+/// Content parts are items of a list, so only a list item can be an image.
+fn collect(value: &Value, in_list: bool, text: &mut String, images: &mut usize) {
     match value {
-        Value::String(s) if s.starts_with("data:") => *images += 1,
         Value::String(s) => {
             text.push_str(s);
             text.push(' ');
         }
-        Value::Array(items) => items.iter().for_each(|item| collect(item, text, images)),
+        Value::Array(items) => items.iter().for_each(|item| collect(item, true, text, images)),
         Value::Object(map) => {
-            if matches!(
+            let image = matches!(
                 map.get("type").and_then(Value::as_str),
                 Some("input_image" | "image_url" | "image")
-            ) {
+            );
+            if in_list && image {
                 *images += 1;
                 return;
             }
-            map.values().for_each(|item| collect(item, text, images));
+            map.values().for_each(|item| collect(item, false, text, images));
         }
         _ => {}
     }

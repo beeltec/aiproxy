@@ -23,14 +23,18 @@ pub fn response(
     let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
         loop {
-            let chunks = match tokio::time::timeout(PING_AFTER, rx.recv()).await {
+            // Dropping `rx` when the client is gone tells the engine to stop.
+            let next = tokio::select! {
+                () = tx.closed() => return,
+                next = tokio::time::timeout(PING_AFTER, rx.recv()) => next,
+            };
+            let chunks = match next {
                 Ok(Some(msg)) => encode(msg),
                 Ok(None) => break,
                 Err(_) => vec![Bytes::from_static(ping.as_bytes())],
             };
             for chunk in chunks {
                 if tx.send(Ok(chunk)).await.is_err() {
-                    // The client is gone; dropping `rx` tells the engine.
                     return;
                 }
             }

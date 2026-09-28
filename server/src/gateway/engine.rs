@@ -407,7 +407,11 @@ async fn stream_events(
             } else {
                 data.clone()
             };
-            let error = codex::classify(400, &json!({ "error": error }).to_string(), None);
+            // Only an invalid request is the fault of the client; other failures are upstream errors.
+            let invalid = error["type"] == "invalid_request_error"
+                || error["code"].as_str().is_some_and(|code| code.starts_with("invalid"));
+            let status = if invalid { 400 } else { 502 };
+            let error = codex::classify(status, &json!({ "error": error }).to_string(), None);
             return match error {
                 SendError::Unauthorized if !committed => StreamEnd::Unauthorized,
                 SendError::Unauthorized => StreamEnd::Failed(unauthorized()),
