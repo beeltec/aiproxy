@@ -39,7 +39,12 @@ pub struct Refresher {
     running: AtomicUsize,
     idle: Notify,
     stopping: AtomicBool,
+    /// Per account: number of the last finished attempt, and its result.
+    attempts: Mutex<HashMap<i64, Attempt>>,
 }
+
+/// Number and result of the last finished refresh attempt of an account.
+type Attempt = (u64, Result<(), Failure>);
 
 /// Why the refresh runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +59,7 @@ pub enum Trigger {
     Retry,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum Failure {
     #[error("the account must be linked again: {0}")]
     NeedsRelogin(String),
@@ -83,7 +88,6 @@ struct RefreshRow {
     credential_generation: i64,
     last_refresh_at: i64,
     last_refresh_failed_at: Option<i64>,
-    last_refresh_error: Option<String>,
     status: String,
 }
 
@@ -107,6 +111,24 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
 }
 
 impl Refresher {
+    fn attempt_number(&self, account: i64) -> u64 {
+        self.attempts.lock().expect("attempts").get(&account).map_or(0, |a| a.0)
+    }
+
+    fn result_after(&self, account: i64, seen: u64) -> Option<Result<(), Failure>> {
+        let attempts = self.attempts.lock().expect("attempts");
+        attempts
+            .get(&account)
+            .filter(|(number, _)| *number > seen)
+            .map(|(_, result)| result.clone())
+    }
+
+    fn record(&self, account: i64, result: &Result<(), Failure>) {
+        let mut attempts = self.attempts.lock().expect("attempts");
+        let number = attempts.get(&account).map_or(0, |a| a.0) + 1;
+        attempts.insert(account, (number, result.clone()));
+    }
+
     fn finish_one(&self) {
         if self.running.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.idle.notify_waiters();
@@ -127,18 +149,29 @@ impl Refresher {
 }
 
 async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
-    let requested_at = now();
-    let guard = if trigger == Trigger::Request {
+    // Result sharing: each finished attempt gets the next number. A caller that sees a higher
+    // number after waiting for the lock takes that result instead of refreshing again.
+    let seen = state.refresher.attempt_number(account);
+    let _guard = if trigger == Trigger::Request {
         tokio::time::timeout(REQUEST_TIMEOUT, state.refresher.lock(account))
             .await
             .map_err(|_| Failure::Temporary("another refresh of this account is still running".into()))?
     } else {
         state.refresher.lock(account).await
     };
+    if let Some(result) = state.refresher.result_after(account, seen) {
+        return result;
+    }
+    let result = attempt(state, account, trigger).await;
+    state.refresher.record(account, &result);
+    result
+}
 
+/// One refresh attempt. The caller holds the account lock.
+async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
     let row: Option<RefreshRow> = sqlx::query_as(
         "SELECT chatgpt_account_id, refresh_token_enc, credential_generation, last_refresh_at,
-             last_refresh_failed_at, last_refresh_error, status
+             last_refresh_failed_at, status
          FROM chatgpt_accounts WHERE id = ?",
     )
     .bind(account)
@@ -151,7 +184,6 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
         credential_generation: generation,
         last_refresh_at,
         last_refresh_failed_at: last_failed_at,
-        last_refresh_error,
         status,
     }) = row
     else {
@@ -159,15 +191,6 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
     };
     if status == "needs_relogin" {
         return Err(Failure::NeedsRelogin("the refresh token does not work any more".into()));
-    }
-    // A refresh that ended while this caller waited for the lock answers for it too.
-    if last_refresh_at >= requested_at {
-        return Ok(());
-    }
-    if last_failed_at.is_some_and(|at| at >= requested_at) {
-        return Err(Failure::Temporary(
-            last_refresh_error.unwrap_or_else(|| "the refresh failed".into()),
-        ));
     }
     if trigger == Trigger::Scheduled
         && state
@@ -276,7 +299,6 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
             .await
             .map_err(db_failure)?;
             tracing::warn!(account, %message, "ChatGPT token refresh failed");
-            drop(guard);
             if trigger != Trigger::Retry {
                 start_retries(state, account, generation);
             }
@@ -303,6 +325,10 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
             // Stop when the account was linked again or another refresh succeeded meanwhile.
+            if !owns(&state, account, sequence) {
+                failing = false;
+                break;
+            }
             let (current, last_refresh_at, last_failed_at) = match progress(&state, account).await {
                 Ok(Some(progress)) => progress,
                 // The account was removed.
@@ -329,7 +355,7 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
                 Err(Failure::Temporary(_)) => continue,
             }
         }
-        if failing {
+        if failing && owns(&state, account, sequence) {
             give_up(&state, account, generation).await;
         }
         let mut retrying = state.refresher.retrying.lock().expect("retrying");
@@ -337,6 +363,18 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
             retrying.remove(&account);
         }
     });
+}
+
+/// True while this retry sequence is the current one of the account.
+fn owns(state: &AppState, account: i64, sequence: u64) -> bool {
+    state
+        .refresher
+        .retrying
+        .lock()
+        .expect("retrying")
+        .get(&account)
+        .map(|r| r.1)
+        == Some(sequence)
 }
 
 async fn progress(state: &AppState, account: i64) -> Result<Option<(i64, i64, Option<i64>)>, sqlx::Error> {
