@@ -282,10 +282,9 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> (Result<()
                 }
             }
             tracing::info!(account, ?trigger, "ChatGPT token refreshed");
-            // A success ends a running retry sequence; a later failure starts a new one.
-            if trigger != Trigger::Retry {
-                state.refresher.retrying.lock().expect("retrying").remove(&account);
-            }
+            // A success ends the retry sequence (while the lock is held), so a later failure starts
+            // a new one.
+            state.refresher.retrying.lock().expect("retrying").remove(&account);
             Ok(())
         }
         Err(RefreshError::Permanent(message)) => {
