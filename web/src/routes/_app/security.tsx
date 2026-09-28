@@ -69,12 +69,12 @@ function Section({
 	children: React.ReactNode;
 }) {
 	return (
-		<section className="grid gap-4 md:grid-cols-[16rem_1fr] md:gap-10">
+		<section className="grid gap-4 lg:grid-cols-[16rem_minmax(0,1fr)] lg:gap-10">
 			<div className="space-y-1">
 				<h2 className="font-semibold">{title}</h2>
 				<p className="text-sm text-muted-foreground">{description}</p>
 			</div>
-			<div>{children}</div>
+			<div className="min-w-0">{children}</div>
 		</section>
 	);
 }
@@ -247,10 +247,11 @@ function describeDevice(userAgent: string | null | undefined): string {
 			["curl/", "curl"],
 		].find(([marker]) => userAgent.includes(marker))?.[1] ?? "Browser";
 	const os = [
+		["iPhone", "iOS"],
+		["iPad", "iPadOS"],
+		["Android", "Android"],
 		["Windows", "Windows"],
 		["Mac OS X", "macOS"],
-		["Android", "Android"],
-		["iPhone", "iOS"],
 		["Linux", "Linux"],
 	].find(([marker]) => userAgent.includes(marker))?.[1];
 	return os ? `${browser} on ${os}` : browser;

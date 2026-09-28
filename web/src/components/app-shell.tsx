@@ -43,7 +43,7 @@ export function AppShell({
 	children: React.ReactNode;
 }) {
 	return (
-		<div className="min-h-dvh md:grid md:grid-cols-[15rem_1fr]">
+		<div className="min-h-dvh md:grid md:grid-cols-[15rem_minmax(0,1fr)]">
 			<aside className="flex flex-col border-b bg-card md:sticky md:top-0 md:h-dvh md:border-r md:border-b-0">
 				<div className="flex h-14 items-center justify-between px-5">
 					<Link to="/" className="rounded-sm">
