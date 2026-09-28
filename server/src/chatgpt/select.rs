@@ -29,8 +29,8 @@ pub enum Selection {
 
 /// The accounts for a model: the primary first, then (with failover) the checked accounts in
 /// their order. Skips accounts that need a new login, are blocked by a usage limit, or are over
-/// the failover threshold. When all are skipped, the one whose limit resets first is tried, so
-/// the client gets the real error.
+/// the failover threshold. The blocked account whose limit resets first comes last: it is tried
+/// when all others fail, so the client gets the real error.
 pub async fn accounts_for(state: &AppState, model_id: i64) -> Result<Selection, sqlx::Error> {
     let settings = settings::load(&state.db).await?;
     let rows: Vec<Candidate> = sqlx::query_as(
@@ -74,25 +74,25 @@ pub async fn accounts_for(state: &AppState, model_id: i64) -> Result<Selection, 
         until
     };
 
-    let usable: Vec<i64> = in_play
+    let mut usable: Vec<i64> = in_play
         .iter()
         .filter(|c| c.status == "active" && blocked_until(c).is_none())
         .map(|c| c.id)
         .collect();
-    if !usable.is_empty() {
-        return Ok(Selection::Accounts(usable));
-    }
     let soonest = in_play
         .iter()
         .filter(|c| c.status == "active")
         .filter_map(|c| blocked_until(c).map(|until| (until, c.id)))
         .min();
-    Ok(match soonest {
-        Some((_, id)) => Selection::Accounts(vec![id]),
-        None if in_play.is_empty() => {
-            Selection::Unavailable("Only a backup account can use this model, and failover is off.".into())
-        }
-        None => Selection::Unavailable("The ChatGPT accounts for this model need a new login.".into()),
+    // The blocked account that resets first comes last, for when all others fail.
+    usable.extend(soonest.map(|(_, id)| id));
+    if !usable.is_empty() {
+        return Ok(Selection::Accounts(usable));
+    }
+    Ok(if in_play.is_empty() {
+        Selection::Unavailable("Only a backup account can use this model, and failover is off.".into())
+    } else {
+        Selection::Unavailable("The ChatGPT accounts for this model need a new login.".into())
     })
 }
 
