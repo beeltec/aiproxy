@@ -3,6 +3,10 @@
 @import "@fontsource-variable/hanken-grotesk";
 @import "@fontsource-variable/martian-mono";
 
+/* Base UI sets data-orientation; the shadcn components use these short variants. */
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
+
 /*
  * Design tokens: "utility meter".
  * Cool gray panels, cobalt for actions, amber only for meter readings and quota warnings.

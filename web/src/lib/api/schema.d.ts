@@ -444,6 +444,187 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/chatgpt/accounts": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_accounts"];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/accounts/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post?: never;
+		/** Removes the account. If it was the primary account, the next one in the order becomes primary. */
+		delete: operations["delete_account"];
+		options?: never;
+		head?: never;
+		patch: operations["update_account"];
+		trace?: never;
+	};
+	"/chatgpt/accounts/{id}/primary": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["make_primary"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/accounts/{id}/refresh": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["refresh_now"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/failover-order": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put: operations["set_failover_order"];
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/link/device": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["start_device_link"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/link/pkce": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["start_pkce_link"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/link/{flow}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["link_status"];
+		put?: never;
+		post?: never;
+		delete: operations["cancel_link"];
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/chatgpt/link/{flow}/callback": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["complete_pkce_link"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/settings": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["get_settings"];
+		put: operations["put_settings"];
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/settings/cron-preview": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * The next 3 run times of a cron plan. The server computes them, so the dashboard shows what
+		 *     the scheduler does.
+		 */
+		post: operations["cron_preview"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/setup": {
 		parameters: {
 			query?: never;
@@ -465,6 +646,47 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
 	schemas: {
+		AccountUpdate: {
+			/** @description Take part in failover. */
+			failover_enabled: boolean;
+			label?: string | null;
+			/** @description Needed when `refresh_mode` is `custom`. */
+			refresh_cron?: string | null;
+			/** @description `inherit`, `custom` or `disabled`. */
+			refresh_mode: string;
+		};
+		AccountView: {
+			/** Format: int64 */
+			access_expires_at?: number | null;
+			/** Format: int64 */
+			created_at: number;
+			email?: string | null;
+			failover_enabled: boolean;
+			/** Format: int64 */
+			failover_order: number;
+			/** Format: int64 */
+			id: number;
+			is_primary: boolean;
+			label?: string | null;
+			/** Format: int64 */
+			last_refresh_at: number;
+			last_refresh_error?: string | null;
+			/** Format: int64 */
+			last_refresh_failed_at?: number | null;
+			/** Format: int64 */
+			models: number;
+			/**
+			 * Format: int64
+			 * @description Next scheduled refresh, computed from the plan.
+			 */
+			next_refresh_at?: number | null;
+			plan_type?: string | null;
+			refresh_cron?: string | null;
+			/** @description `inherit`, `custom` or `disabled`. */
+			refresh_mode: string;
+			/** @description `active` or `needs_relogin`. */
+			status: string;
+		};
 		AdminView: {
 			/** Format: int64 */
 			created_at: number;
@@ -522,6 +744,20 @@ export interface components {
 			/** @description The full key. It is shown only once. */
 			key: string;
 		};
+		CronPreview: {
+			/** @description The next 3 runs, unix seconds. */
+			next_runs: number[];
+		};
+		CronPreviewRequest: {
+			cron: string;
+			/** @description Default: the instance time zone. */
+			time_zone?: string | null;
+		};
+		DeviceLink: {
+			flow: string;
+			user_code: string;
+			verification_url: string;
+		};
 		ErrorBody: {
 			error: components["schemas"]["ErrorDetail"];
 		};
@@ -539,6 +775,18 @@ export interface components {
 			recovery_codes_left: number;
 			totp: boolean;
 		};
+		Failover: {
+			enabled: boolean;
+			/**
+			 * Format: int32
+			 * @description Switch to the next account when its 5-hour or weekly usage reaches this percentage.
+			 */
+			threshold_percent: number;
+		};
+		FailoverOrder: {
+			/** @description All account ids in the new order. */
+			account_ids: number[];
+		};
 		/** @description Settings of a key. The same body is used to create and to change a key. */
 		KeySettings: {
 			/** @description Model patterns, for example `chatgpt/*` or `anthropic-main/claude-opus-5-5`. Empty: all models. */
@@ -552,6 +800,13 @@ export interface components {
 			rpm_limit?: number | null;
 			/** Format: int64 */
 			tpm_limit?: number | null;
+		};
+		LinkStatus: {
+			/** Format: int64 */
+			account_id?: number | null;
+			message?: string | null;
+			/** @description `pending`, `done` or `failed`. */
+			status: string;
 		};
 		LoginRequest: {
 			password: string;
@@ -589,8 +844,22 @@ export interface components {
 			last_used_at?: number | null;
 			name: string;
 		};
+		PastedCallback: {
+			url: string;
+		};
+		PkceLink: {
+			/** @description Open this address, log in, then paste the address of the page you land on. */
+			authorize_url: string;
+			flow: string;
+		};
 		RecoveryCodes: {
 			recovery_codes: string[];
+		};
+		/** @description Scheduled token refresh of the ChatGPT accounts. */
+		RefreshSchedule: {
+			/** @description 5-field cron: minute hour day-of-month month day-of-week. */
+			cron: string;
+			enabled: boolean;
 		};
 		RegisterRequest: {
 			ceremony: string;
@@ -613,6 +882,12 @@ export interface components {
 			/** Format: int64 */
 			last_seen_at: number;
 			user_agent?: string | null;
+		};
+		Settings: {
+			failover: components["schemas"]["Failover"];
+			refresh: components["schemas"]["RefreshSchedule"];
+			/** @description IANA time zone, for example `Europe/Berlin`. Cron plans use it. */
+			time_zone: string;
 		};
 		SetupRequest: {
 			password: string;
@@ -1519,6 +1794,371 @@ export interface operations {
 				};
 			};
 			429: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	list_accounts: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AccountView"][];
+				};
+			};
+		};
+	};
+	delete_account: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	update_account: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["AccountUpdate"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AccountView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	make_primary: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	refresh_now: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AccountView"];
+				};
+			};
+			/** @description The refresh failed */
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	set_failover_order: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["FailoverOrder"];
+			};
+		};
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+		};
+	};
+	start_device_link: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["DeviceLink"];
+				};
+			};
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	start_pkce_link: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PkceLink"];
+				};
+			};
+		};
+	};
+	link_status: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				flow: string;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["LinkStatus"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	cancel_link: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				flow: string;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+		};
+	};
+	complete_pkce_link: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				flow: string;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["PastedCallback"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["LinkStatus"];
+				};
+			};
+		};
+	};
+	get_settings: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["Settings"];
+				};
+			};
+		};
+	};
+	put_settings: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["Settings"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["Settings"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	cron_preview: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["CronPreviewRequest"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["CronPreview"];
+				};
+			};
+			400: {
 				headers: {
 					[name: string]: unknown;
 				};

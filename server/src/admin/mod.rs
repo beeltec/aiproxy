@@ -5,8 +5,10 @@ mod admins;
 mod api_keys;
 pub mod auth;
 mod factors;
+mod instance_settings;
 mod passkeys;
 mod session;
+mod subscriptions;
 
 pub use passkeys::Ceremonies;
 
@@ -38,6 +40,8 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(factors::router())
         .merge(passkeys::router())
         .merge(api_keys::router())
+        .merge(subscriptions::router())
+        .merge(instance_settings::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

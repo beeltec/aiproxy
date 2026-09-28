@@ -1,10 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+	BadgeCheckIcon,
 	ChevronsUpDownIcon,
 	GaugeIcon,
 	KeyRoundIcon,
 	LogOutIcon,
+	SettingsIcon,
 	ShieldCheckIcon,
 	UsersIcon,
 } from "lucide-react";
@@ -20,7 +22,13 @@ import { api, call, errorMessage } from "#/lib/api/client";
 import { meQuery } from "#/lib/session";
 
 type NavItem = {
-	to: "/" | "/api-keys" | "/admins" | "/security";
+	to:
+		| "/"
+		| "/api-keys"
+		| "/subscriptions"
+		| "/admins"
+		| "/settings"
+		| "/security";
 	label: string;
 	icon: React.ComponentType<{ className?: string }>;
 };
@@ -32,11 +40,17 @@ const NAV: { group: string; items: NavItem[] }[] = [
 	},
 	{
 		group: "Gateway",
-		items: [{ to: "/api-keys", label: "API keys", icon: KeyRoundIcon }],
+		items: [
+			{ to: "/subscriptions", label: "Subscriptions", icon: BadgeCheckIcon },
+			{ to: "/api-keys", label: "API keys", icon: KeyRoundIcon },
+		],
 	},
 	{
 		group: "Instance",
-		items: [{ to: "/admins", label: "Admins", icon: UsersIcon }],
+		items: [
+			{ to: "/admins", label: "Admins", icon: UsersIcon },
+			{ to: "/settings", label: "Settings", icon: SettingsIcon },
+		],
 	},
 ];
 

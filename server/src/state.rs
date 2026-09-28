@@ -5,7 +5,11 @@ use axum::extract::FromRef;
 use sqlx::SqlitePool;
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
+use tokio::sync::Notify;
+
 use crate::admin::Ceremonies;
+use crate::chatgpt::link::LinkFlows;
+use crate::chatgpt::refresh::Refresher;
 use crate::client_ip::TrustedProxies;
 use crate::config::Config;
 use crate::crypto::{PasswordHasher, SecretBox};
@@ -24,6 +28,12 @@ pub struct AppState {
     pub ceremonies: Arc<Ceremonies>,
     pub key_limits: Arc<KeyLimits>,
     pub rejected: Arc<RejectedCounter>,
+    /// HTTP client for fixed upstreams (OpenAI, ChatGPT). It follows no redirects.
+    pub http: reqwest::Client,
+    pub refresher: Arc<Refresher>,
+    pub link_flows: Arc<LinkFlows>,
+    /// Wakes the refresh scheduler after changes to the plans.
+    pub schedule_changed: Arc<Notify>,
 }
 
 /// Limits for login and setup attempts.
@@ -43,6 +53,13 @@ impl AppState {
             ceremonies: Arc::default(),
             key_limits: Arc::default(),
             rejected: Arc::default(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(30))
+                .build()?,
+            refresher: Arc::default(),
+            link_flows: Arc::default(),
+            schedule_changed: Arc::default(),
             config: Arc::new(config),
             db,
             hasher: PasswordHasher::new(),

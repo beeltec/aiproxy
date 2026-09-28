@@ -1,4 +1,5 @@
 mod admin;
+mod chatgpt;
 mod client_ip;
 mod config;
 mod crypto;
@@ -6,6 +7,7 @@ mod db;
 mod error;
 mod gateway;
 mod rate_limit;
+mod settings;
 mod state;
 mod web_assets;
 
@@ -29,6 +31,7 @@ use crate::state::AppState;
 use crate::web_assets::WebAssets;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const REFRESH_DRAIN: Duration = Duration::from_secs(120);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,6 +67,7 @@ async fn serve() -> anyhow::Result<()> {
     let rejected = state.rejected.clone();
     let rejected_db = state.db.clone();
     tokio::spawn(async move { rejected.run(rejected_db).await });
+    tokio::spawn(chatgpt::scheduler::run(state.clone()));
     let app = router(state.clone(), WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await
@@ -86,6 +90,14 @@ async fn serve() -> anyhow::Result<()> {
     tokio::select! {
         result = server.into_future() => result?,
         () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
+    }
+    // A refresh that is running must save its rotated token before the process ends. The budget
+    // covers the 30 s OAuth request plus the save retries with their database waits.
+    if tokio::time::timeout(REFRESH_DRAIN, state.refresher.drain())
+        .await
+        .is_err()
+    {
+        tracing::warn!("token refreshes did not end in time");
     }
     state.rejected.flush(&state.db).await;
     tracing::info!("aiproxy stopped");
