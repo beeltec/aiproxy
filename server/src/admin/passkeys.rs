@@ -252,7 +252,7 @@ async fn register(
         return Err(ApiError::unauthorized());
     }
     Ok(Json(FactorAdded {
-        recovery_codes: factors::first_recovery_codes(&state.db, current.admin_id).await?,
+        recovery_codes: factors::first_recovery_codes(&state.db, current.admin_id, current.session_id).await?,
     }))
 }
 

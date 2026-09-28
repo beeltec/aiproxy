@@ -197,6 +197,19 @@ pub async fn delete(db: &SqlitePool, session_id: i64) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// Starts a transaction with a write on the session row. SQLite allows only one writer at a
+/// time, so the rest of the transaction runs while the session is known to exist, and a parallel
+/// reset waits. Returns false when the session no longer exists.
+pub async fn claim(tx: &mut sqlx::SqliteConnection, session_id: i64) -> Result<bool, sqlx::Error> {
+    let claimed =
+        sqlx::query("UPDATE sessions SET last_seen_at = last_seen_at WHERE id = ? AND pending_second_factor = 0")
+            .bind(session_id)
+            .execute(tx)
+            .await?
+            .rows_affected();
+    Ok(claimed == 1)
+}
+
 /// Deletes all sessions of an admin, optionally except one.
 pub async fn delete_all_of(
     db: impl sqlx::SqliteExecutor<'_>,

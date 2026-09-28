@@ -43,7 +43,7 @@ pub struct Methods {
     pub recovery_code: bool,
 }
 
-pub async fn methods(db: &SqlitePool, admin_id: i64) -> Result<Methods, sqlx::Error> {
+pub async fn methods(db: impl sqlx::SqliteExecutor<'_>, admin_id: i64) -> Result<Methods, sqlx::Error> {
     let (totp, passkey, recovery_code): (bool, bool, bool) = sqlx::query_as(
         "SELECT
              EXISTS (SELECT 1 FROM admin_totp WHERE admin_id = ?1 AND confirmed = 1),
@@ -208,8 +208,8 @@ fn totp(secret: Vec<u8>, username: &str) -> anyhow::Result<Totp> {
 enum TotpUse {
     /// Second login step with the active secret.
     Login,
-    /// Confirms the new secret and turns TOTP on.
-    Confirm,
+    /// Confirms the new secret and turns TOTP on, only while this full session exists.
+    Confirm { session_id: i64 },
 }
 
 /// Checks a code. A time step is accepted only once. The update is bound to the exact secret
@@ -231,14 +231,20 @@ async fn check_totp(state: &AppState, admin_id: i64, username: &str, code: &str,
         return Ok(false);
     };
     let step = i64::try_from(step).map_err(|_| ApiError::internal())?;
+    let session_id = match usage {
+        TotpUse::Login => None,
+        TotpUse::Confirm { session_id } => Some(session_id),
+    };
     let accepted = sqlx::query(
         "UPDATE admin_totp SET last_used_step = ?1, confirmed = 1
-         WHERE admin_id = ?2 AND secret_enc = ?3 AND confirmed = ?4 AND last_used_step < ?1",
+         WHERE admin_id = ?2 AND secret_enc = ?3 AND confirmed = ?4 AND last_used_step < ?1
+             AND (?5 IS NULL OR EXISTS (SELECT 1 FROM sessions WHERE id = ?5 AND pending_second_factor = 0))",
     )
     .bind(step)
     .bind(admin_id)
     .bind(&stored)
     .bind(confirmed)
+    .bind(session_id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -334,7 +340,17 @@ async fn confirm_totp(
     State(state): State<AppState>,
     Json(req): Json<CodeRequest>,
 ) -> ApiResult<Json<FactorAdded>> {
-    if !check_totp(&state, current.admin_id, &current.username, &req.code, TotpUse::Confirm).await? {
+    if !check_totp(
+        &state,
+        current.admin_id,
+        &current.username,
+        &req.code,
+        TotpUse::Confirm {
+            session_id: current.session_id,
+        },
+    )
+    .await?
+    {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "wrong_code",
@@ -342,7 +358,7 @@ async fn confirm_totp(
         ));
     }
     Ok(Json(FactorAdded {
-        recovery_codes: first_recovery_codes(&state.db, current.admin_id).await?,
+        recovery_codes: first_recovery_codes(&state.db, current.admin_id, current.session_id).await?,
     }))
 }
 
@@ -383,46 +399,62 @@ fn generate_recovery_codes() -> Vec<String> {
 }
 
 /// Replaces all recovery codes of the admin with new ones and returns them.
-async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Vec<String>, sqlx::Error> {
+/// Needs an active second factor and the calling session.
+async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64, session_id: i64) -> ApiResult<Vec<String>> {
     let codes = generate_recovery_codes();
     let mut tx = db.begin().await?;
+    if !session::claim(&mut tx, session_id).await? {
+        return Err(ApiError::unauthorized());
+    }
+    if !methods(&mut *tx, admin_id).await?.any() {
+        return Err(ApiError::conflict("Add a second factor first."));
+    }
     sqlx::query("DELETE FROM admin_recovery_codes WHERE admin_id = ?")
         .bind(admin_id)
         .execute(&mut *tx)
         .await?;
-    for code in &codes {
+    insert_recovery_codes(&mut tx, admin_id, &codes).await?;
+    tx.commit().await?;
+    Ok(codes)
+}
+
+/// Creates recovery codes after a second factor was added, if the admin has none yet.
+/// Returns `None` when codes exist, or when a parallel reset removed the factor or the session.
+pub async fn first_recovery_codes(
+    db: &SqlitePool,
+    admin_id: i64,
+    session_id: i64,
+) -> Result<Option<Vec<String>>, sqlx::Error> {
+    let codes = generate_recovery_codes();
+    let mut tx = db.begin().await?;
+    if !session::claim(&mut tx, session_id).await? || !methods(&mut *tx, admin_id).await?.any() {
+        return Ok(None);
+    }
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_recovery_codes WHERE admin_id = ?")
+        .bind(admin_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if existing > 0 {
+        return Ok(None);
+    }
+    insert_recovery_codes(&mut tx, admin_id, &codes).await?;
+    tx.commit().await?;
+    Ok(Some(codes))
+}
+
+async fn insert_recovery_codes(
+    tx: &mut sqlx::SqliteConnection,
+    admin_id: i64,
+    codes: &[String],
+) -> Result<(), sqlx::Error> {
+    for code in codes {
         sqlx::query("INSERT INTO admin_recovery_codes (admin_id, code_hash) VALUES (?, ?)")
             .bind(admin_id)
             .bind(recovery_code_hash(code))
             .execute(&mut *tx)
             .await?;
     }
-    tx.commit().await?;
-    Ok(codes)
-}
-
-/// Creates recovery codes after a second factor was added, if the admin has none yet.
-/// The first insert decides it: a parallel request waits for this write and then finds codes.
-pub async fn first_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Option<Vec<String>>, sqlx::Error> {
-    let codes = generate_recovery_codes();
-    let mut tx = db.begin().await?;
-    for (index, code) in codes.iter().enumerate() {
-        let inserted = sqlx::query(
-            "INSERT INTO admin_recovery_codes (admin_id, code_hash)
-             SELECT ?1, ?2 WHERE ?3 OR NOT EXISTS (SELECT 1 FROM admin_recovery_codes WHERE admin_id = ?1)",
-        )
-        .bind(admin_id)
-        .bind(recovery_code_hash(code))
-        .bind(index > 0)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if inserted == 0 {
-            return Ok(None);
-        }
-    }
-    tx.commit().await?;
-    Ok(Some(codes))
+    Ok(())
 }
 
 /// Recovery codes are useless without a second factor, so they go with the last one.
@@ -449,11 +481,8 @@ pub struct RecoveryCodes {
     (status = CONFLICT, body = ErrorBody, description = "No second factor is active"),
 ))]
 async fn new_recovery_codes(current: AdminSession, State(state): State<AppState>) -> ApiResult<Json<RecoveryCodes>> {
-    if !methods(&state.db, current.admin_id).await?.any() {
-        return Err(ApiError::conflict("Add a second factor first."));
-    }
     Ok(Json(RecoveryCodes {
-        recovery_codes: replace_recovery_codes(&state.db, current.admin_id).await?,
+        recovery_codes: replace_recovery_codes(&state.db, current.admin_id, current.session_id).await?,
     }))
 }
 
@@ -466,14 +495,10 @@ async fn new_recovery_codes(current: AdminSession, State(state): State<AppState>
     (status = NOT_FOUND, body = ErrorBody),
 ))]
 async fn reset_factors(_: AdminSession, State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
+    // The deletes come first: a write at the start takes the SQLite write lock, so a parallel
+    // write cannot make this transaction fail later.
     let mut tx = state.db.begin().await?;
-    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM admins WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
-        return Err(ApiError::not_found("The admin does not exist."));
-    }
+    session::delete_all_of(&mut *tx, id, None).await?;
     for sql in [
         "DELETE FROM admin_totp WHERE admin_id = ?",
         "DELETE FROM admin_passkeys WHERE admin_id = ?",
@@ -481,7 +506,13 @@ async fn reset_factors(_: AdminSession, State(state): State<AppState>, Path(id):
     ] {
         sqlx::query(sql).bind(id).execute(&mut *tx).await?;
     }
-    session::delete_all_of(&mut *tx, id, None).await?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM admins WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::not_found("The admin does not exist."));
+    }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
