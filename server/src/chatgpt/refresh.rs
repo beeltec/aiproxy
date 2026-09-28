@@ -121,6 +121,9 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
             last_refresh_error.unwrap_or_else(|| "the refresh failed".into()),
         ));
     }
+    if trigger == Trigger::Scheduled && state.refresher.retrying.lock().expect("retrying").contains(&account) {
+        return Err(Failure::Temporary("retries after a failed refresh are running".into()));
+    }
     let now = now();
     if trigger != Trigger::Manual && now - last_refresh_at < FRESH_SECS {
         return Ok(());
@@ -141,7 +144,10 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
         BACKGROUND_TIMEOUT
     };
 
-    match oauth::refresh(&state.http, &refresh_token, timeout).await {
+    let result = oauth::refresh(&state.http, &refresh_token, timeout).await;
+    // The end time, so callers that waited during the request see this result.
+    let now = crate::db::now();
+    match result {
         Ok(tokens) => {
             let enc = |field: &str, value: &str| state.secrets.encrypt(&aad(&chatgpt_id, field), value.as_bytes());
             let access = enc("access_token", &tokens.access_token);
@@ -197,15 +203,16 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
             tracing::warn!(account, %message, "ChatGPT token refresh failed");
             drop(guard);
             if trigger != Trigger::Retry {
-                start_retries(state, account);
+                start_retries(state, account, generation);
             }
             Err(Failure::Temporary(message))
         }
     }
 }
 
-/// Tries again after 30 s, 2 min and 10 min, once per account at a time.
-fn start_retries(state: &AppState, account: i64) {
+/// Tries again after 30 s, 2 min and 10 min, once per account at a time. The sequence stops
+/// when the credentials change (re-link).
+fn start_retries(state: &AppState, account: i64, generation: i64) {
     if !state.refresher.retrying.lock().expect("retrying").insert(account) {
         return;
     }
@@ -214,6 +221,10 @@ fn start_retries(state: &AppState, account: i64) {
         let mut failing = true;
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
+            if current_generation(&state, account).await != Some(generation) {
+                failing = false;
+                break;
+            }
             match refresh(&state, account, Trigger::Retry).await {
                 Ok(()) | Err(Failure::NeedsRelogin(_)) => {
                     failing = false;
@@ -223,20 +234,31 @@ fn start_retries(state: &AppState, account: i64) {
             }
         }
         if failing {
-            give_up(&state, account).await;
+            give_up(&state, account, generation).await;
         }
         state.refresher.retrying.lock().expect("retrying").remove(&account);
     });
 }
 
+async fn current_generation(state: &AppState, account: i64) -> Option<i64> {
+    sqlx::query_scalar("SELECT credential_generation FROM chatgpt_accounts WHERE id = ?")
+        .bind(account)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// After the last retry failed, the account needs a new login. Only if it still fails: a
 /// successful refresh or a re-link in the meantime keeps it active.
-async fn give_up(state: &AppState, account: i64) {
+async fn give_up(state: &AppState, account: i64, generation: i64) {
     let result = sqlx::query(
         "UPDATE chatgpt_accounts SET status = 'needs_relogin'
-         WHERE id = ? AND status = 'active' AND last_refresh_failed_at > last_refresh_at",
+         WHERE id = ? AND credential_generation = ? AND status = 'active'
+             AND last_refresh_failed_at > last_refresh_at",
     )
     .bind(account)
+    .bind(generation)
     .execute(&state.db)
     .await;
     match result {

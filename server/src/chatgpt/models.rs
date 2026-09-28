@@ -56,13 +56,14 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
     let list: ModelsResponse = response.json().await?;
 
     let now = now();
+    // The delete comes first: it takes the write lock before any read in this transaction.
     let mut tx = state.db.begin().await?;
-    let first_list: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM models WHERE source = 'chatgpt')")
-        .fetch_one(&mut *tx)
-        .await?;
     sqlx::query("DELETE FROM chatgpt_account_models WHERE account_id = ?")
         .bind(account)
         .execute(&mut *tx)
+        .await?;
+    let first_list: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM models WHERE source = 'chatgpt')")
+        .fetch_one(&mut *tx)
         .await?;
     for model in &list.models {
         let efforts: Vec<&str> = model
