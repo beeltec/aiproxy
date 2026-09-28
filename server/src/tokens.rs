@@ -75,6 +75,10 @@ fn collect(value: &Value, in_list: bool, text: &mut String, images: &mut usize) 
             text.push_str(s);
             text.push(' ');
         }
+        Value::Number(n) => {
+            text.push_str(&n.to_string());
+            text.push(' ');
+        }
         Value::Array(items) => items.iter().for_each(|item| collect(item, true, text, images)),
         Value::Object(map) => {
             let image = matches!(
@@ -85,7 +89,12 @@ fn collect(value: &Value, in_list: bool, text: &mut String, images: &mut usize) 
                 *images += 1;
                 return;
             }
-            map.values().for_each(|item| collect(item, false, text, images));
+            // Keys count too: in tool schemas, the property names are a large part of the text.
+            for (key, item) in map {
+                text.push_str(key);
+                text.push(' ');
+                collect(item, false, text, images);
+            }
         }
         _ => {}
     }

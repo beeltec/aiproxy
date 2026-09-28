@@ -235,6 +235,19 @@ fn finish_reason(response: &Value, has_tool_calls: bool) -> &'static str {
     }
 }
 
+/// A Responses URL citation in the Chat form. `offset` is the length of the message text before
+/// the content part, because Chat indexes count from the start of the full text.
+fn url_citation(annotation: &Value, offset: u64) -> Option<Value> {
+    if annotation["type"] != "url_citation" {
+        return None;
+    }
+    let index = |field: &str| annotation[field].as_u64().map(|i| i + offset);
+    Some(json!({ "type": "url_citation", "url_citation": {
+        "url": annotation["url"], "title": annotation["title"],
+        "start_index": index("start_index"), "end_index": index("end_index"),
+    } }))
+}
+
 /// Builds the chat completion from the final Responses object.
 pub fn from_response(response: &Value, model: &str) -> Value {
     let mut text = String::new();
@@ -249,15 +262,8 @@ pub fn from_response(response: &Value, model: &str) -> Value {
                     if let Some(t) = part["text"].as_str() {
                         // Chat indexes count from the start of the full message text.
                         let offset = text.chars().count() as u64;
-                        for a in part["annotations"].as_array().into_iter().flatten() {
-                            if a["type"] == "url_citation" {
-                                let index = |field: &str| a[field].as_u64().map(|i| i + offset);
-                                annotations.push(json!({ "type": "url_citation", "url_citation": {
-                                    "url": a["url"], "title": a["title"],
-                                    "start_index": index("start_index"), "end_index": index("end_index"),
-                                } }));
-                            }
-                        }
+                        let found = part["annotations"].as_array().into_iter().flatten();
+                        annotations.extend(found.filter_map(|a| url_citation(a, offset)));
                         text.push_str(t);
                     }
                     if let Some(t) = part["refusal"].as_str() {
@@ -328,6 +334,9 @@ struct ChunkEncoder {
     started: bool,
     /// Output item id → tool call index.
     tool_index: HashMap<String, usize>,
+    /// Characters of message text sent, and where the current content part starts.
+    text_chars: u64,
+    part_start: u64,
 }
 
 impl ChunkEncoder {
@@ -339,6 +348,8 @@ impl ChunkEncoder {
             created: now(),
             started: false,
             tool_index: HashMap::new(),
+            text_chars: 0,
+            part_start: 0,
         }
     }
 
@@ -360,7 +371,16 @@ impl ChunkEncoder {
             Msg::Event(event) => {
                 let data = &event.data;
                 match event.kind.as_str() {
-                    "response.output_text.delta" => out.push(self.chunk(json!({ "content": data["delta"] }), None)),
+                    "response.output_text.delta" => {
+                        self.text_chars += data["delta"].as_str().map_or(0, |d| d.chars().count() as u64);
+                        out.push(self.chunk(json!({ "content": data["delta"] }), None));
+                    }
+                    "response.content_part.added" => self.part_start = self.text_chars,
+                    "response.output_text.annotation.added" => {
+                        if let Some(citation) = url_citation(&data["annotation"], self.part_start) {
+                            out.push(self.chunk(json!({ "annotations": [citation] }), None));
+                        }
+                    }
                     "response.refusal.delta" => out.push(self.chunk(json!({ "refusal": data["delta"] }), None)),
                     "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                         out.push(self.chunk(json!({ "reasoning_content": data["delta"] }), None));

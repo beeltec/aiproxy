@@ -189,6 +189,21 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     if let Some(max) = body["max_tokens"].as_i64() {
         out.insert("max_output_tokens".into(), json!(max));
     }
+    let format = &body["output_config"]["format"];
+    match format["type"].as_str() {
+        None => {}
+        Some("json_schema") => {
+            out.insert(
+                "text".into(),
+                json!({ "format": { "type": "json_schema", "name": "output", "schema": format["schema"], "strict": true } }),
+            );
+        }
+        Some(other) => {
+            return Err(format!(
+                "The output format `{other}` is not supported. Use `json_schema`."
+            ));
+        }
+    }
     Ok(Value::Object(out))
 }
 
@@ -282,6 +297,10 @@ fn user_message(blocks: &[Value], input: &mut Vec<Value>) -> Result<(), String> 
                 if block["is_error"].as_bool() == Some(true) {
                     output = match output {
                         Value::String(text) => json!(format!("Error: {text}")),
+                        Value::Array(mut parts) => {
+                            parts.insert(0, json!({ "type": "input_text", "text": "Error:" }));
+                            Value::Array(parts)
+                        }
                         other => other,
                     };
                 }
@@ -389,9 +408,34 @@ fn assistant_message(blocks: &[Value], input: &mut Vec<Value>) {
                 "name": block["name"],
                 "arguments": block["input"].to_string(),
             })),
+            // An earlier web search goes back as text: the backend cannot take search items
+            // without stored state.
+            "server_tool_use" if block["name"] == "web_search" => {
+                let query = block["input"]["query"].as_str().unwrap_or_default();
+                input.push(assistant_text(&format!("Web search: {query}")));
+            }
+            "web_search_tool_result" => {
+                let sources: Vec<String> = block["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| {
+                        r["url"]
+                            .as_str()
+                            .map(|url| format!("- {} {url}", r["title"].as_str().unwrap_or_default()))
+                    })
+                    .collect();
+                if !sources.is_empty() {
+                    input.push(assistant_text(&format!("Search results:\n{}", sources.join("\n"))));
+                }
+            }
             _ => {}
         }
     }
+}
+
+fn assistant_text(text: &str) -> Value {
+    json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
 }
 
 // ---------------------------------------------------------------------------------------------

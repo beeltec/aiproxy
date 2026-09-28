@@ -268,7 +268,7 @@ enum Next {
 async fn failure_of(state: &AppState, account: i64, error: SendError) -> Next {
     match error {
         SendError::UsageLimit { until, message } => {
-            select::mark_limited(state, account, until).await;
+            let until = select::mark_limited(state, account, until).await;
             let mut failure = Failure::new(StatusCode::TOO_MANY_REQUESTS, "usage_limit_reached", message);
             failure.retry_after = Some((until - now()).max(1) as u64);
             Next::Account(failure)

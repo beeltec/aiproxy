@@ -137,8 +137,36 @@ pub async fn store_quota(state: &AppState, account: i64, headers: &reqwest::head
     }
 }
 
-/// Blocks the account after a usage-limit error until `until`.
-pub async fn mark_limited(state: &AppState, account: i64, until: i64) {
+/// Used percent and reset time of the primary and the secondary window.
+type QuotaWindows = (Option<f64>, Option<i64>, Option<f64>, Option<i64>);
+
+/// Blocks the account after a usage-limit error. Without `until`, the block lasts until the
+/// reset of a full quota window, else one hour. Returns the end of the block.
+pub async fn mark_limited(state: &AppState, account: i64, until: Option<i64>) -> i64 {
+    let now = now();
+    let until = match until {
+        Some(until) => until,
+        None => {
+            let windows: Option<QuotaWindows> = sqlx::query_as(
+                "SELECT primary_used_percent, primary_reset_at, secondary_used_percent, secondary_reset_at
+                 FROM chatgpt_quota WHERE account_id = ?",
+            )
+            .bind(account)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+            windows
+                .and_then(|(p_used, p_reset, s_used, s_reset)| {
+                    [(p_used, p_reset), (s_used, s_reset)]
+                        .into_iter()
+                        .filter(|(used, reset)| used.is_some_and(|u| u >= 100.0) && reset.is_some_and(|r| r > now))
+                        .filter_map(|(_, reset)| reset)
+                        .max()
+                })
+                .unwrap_or(now + 3600)
+        }
+    };
     let result = sqlx::query("UPDATE chatgpt_accounts SET limited_until = ? WHERE id = ?")
         .bind(until)
         .bind(account)
@@ -147,4 +175,5 @@ pub async fn mark_limited(state: &AppState, account: i64, until: i64) {
     if let Err(err) = result {
         tracing::warn!(account, error = %err, "cannot store the usage-limit block");
     }
+    until
 }

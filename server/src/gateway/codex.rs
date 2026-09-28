@@ -102,8 +102,8 @@ fn routing_hint(body: &Value) -> String {
 pub enum SendError {
     /// Access token not accepted: refresh and try once more.
     Unauthorized,
-    /// Usage limit reached; blocked until this unix time.
-    UsageLimit { until: i64, message: String },
+    /// Usage limit reached, blocked until this unix time. Without a reset time, the stored quota gives it.
+    UsageLimit { until: Option<i64>, message: String },
     /// Short-term throttling: the account is not blocked.
     Throttled { retry_after: Option<i64>, message: String },
     /// Any other failure, with the status to show the client.
@@ -185,8 +185,7 @@ pub fn classify(status: u16, body: &str, retry_after: Option<i64>) -> SendError 
         let until = error["resets_at"]
             .as_i64()
             .or_else(|| error["resets_in_seconds"].as_i64().map(|s| now + s))
-            .or_else(|| retry_after.map(|s| now + s))
-            .unwrap_or(now + 3600);
+            .or_else(|| retry_after.map(|s| now + s));
         return SendError::UsageLimit { until, message };
     }
     if kind == "rate_limit_exceeded" || status == 429 {
