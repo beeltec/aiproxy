@@ -157,16 +157,15 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
             "function_call_output" => {
                 let output = &item["output"];
                 messages.push(json!({ "role": "tool", "tool_call_id": item["call_id"], "content": text_of(output) }));
-                let images: Vec<Value> = output
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|p| p["type"] == "input_image")
-                    .filter_map(|p| chat_part(p).ok().flatten())
-                    .collect();
+                let mut images: Vec<Value> = Vec::new();
+                for part in output.as_array().into_iter().flatten() {
+                    if matches!(part["type"].as_str(), Some("input_image" | "input_file")) {
+                        images.extend(chat_part(part)?);
+                    }
+                }
                 if !images.is_empty() {
                     tool_images.push(json!({ "type": "text", "text": format!(
-                        "Images from the result of tool call {}:",
+                        "Images and files from the result of tool call {}:",
                         item["call_id"].as_str().unwrap_or_default()
                     ) }));
                     tool_images.extend(images);
@@ -207,6 +206,8 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                 "strict": tool["strict"].as_bool().unwrap_or(false),
             } })),
             "web_search" => match kind {
+                // Tools switched off: the plugin would search anyway.
+                _ if body["tool_choice"] == "none" => {}
                 Kind::OpenRouter => {
                     let mut plugin = json!({ "id": "web" });
                     if let Some(domains) = tool["filters"]["allowed_domains"].as_array() {
@@ -215,6 +216,9 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                     out.insert("plugins".into(), json!([plugin]));
                 }
                 _ => {
+                    if !tool["filters"]["allowed_domains"].is_null() {
+                        return Err("Web search with `allowed_domains` is not supported for this model.".into());
+                    }
                     let mut options = json!({});
                     if let Some(size) = tool["search_context_size"].as_str() {
                         options["search_context_size"] = json!(size);
@@ -298,6 +302,18 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
 // ---------------------------------------------------------------------------------------------
 // Stream
 
+/// The open message item: its text and refusal parts in the order they started.
+#[derive(Default)]
+struct Message {
+    item_id: String,
+    index: usize,
+    text: String,
+    refusal: String,
+    text_part: Option<usize>,
+    refusal_part: Option<usize>,
+    parts: usize,
+}
+
 struct ToolCall {
     item_id: String,
     output_index: usize,
@@ -318,7 +334,7 @@ pub struct ChatDecoder {
     reasoning: Option<(String, usize, String)>,
     /// OpenRouter reasoning details by index, merged from the deltas.
     details: BTreeMap<i64, Value>,
-    message: Option<(String, usize, String, String)>,
+    message: Option<Message>,
     annotations: Vec<Value>,
     tools: BTreeMap<i64, ToolCall>,
     done_items: Vec<(usize, Value)>,
@@ -393,27 +409,43 @@ impl ChatDecoder {
     }
 
     fn close_message(&mut self, out: &mut Vec<Event>) {
-        let Some((item_id, index, text, refusal)) = self.message.take() else {
+        let Some(message) = self.message.take() else {
             return;
         };
-        let mut content = Vec::new();
-        if !text.is_empty() || refusal.is_empty() {
-            let part =
-                json!({ "type": "output_text", "text": text, "annotations": std::mem::take(&mut self.annotations) });
+        let (item_id, index) = (message.item_id, message.index);
+        let mut content = vec![Value::Null; message.parts];
+        if let Some(part_index) = message.text_part {
+            let part = json!({ "type": "output_text", "text": message.text,
+                               "annotations": std::mem::take(&mut self.annotations) });
             self.emit(
                 out,
                 "response.output_text.done",
-                json!({ "item_id": item_id, "output_index": index, "content_index": 0, "text": text }),
+                json!({ "item_id": item_id, "output_index": index,
+                "content_index": part_index, "text": message.text }),
             );
             self.emit(
                 out,
                 "response.content_part.done",
-                json!({ "item_id": item_id, "output_index": index, "content_index": 0, "part": part.clone() }),
+                json!({ "item_id": item_id, "output_index": index,
+                "content_index": part_index, "part": part.clone() }),
             );
-            content.push(part);
+            content[part_index] = part;
         }
-        if !refusal.is_empty() {
-            content.push(json!({ "type": "refusal", "refusal": refusal }));
+        if let Some(part_index) = message.refusal_part {
+            let part = json!({ "type": "refusal", "refusal": message.refusal });
+            self.emit(
+                out,
+                "response.refusal.done",
+                json!({ "item_id": item_id, "output_index": index,
+                "content_index": part_index, "refusal": message.refusal }),
+            );
+            self.emit(
+                out,
+                "response.content_part.done",
+                json!({ "item_id": item_id, "output_index": index,
+                "content_index": part_index, "part": part.clone() }),
+            );
+            content[part_index] = part;
         }
         let item =
             json!({ "id": item_id, "type": "message", "role": "assistant", "status": "completed", "content": content });
@@ -425,7 +457,9 @@ impl ChatDecoder {
         self.done_items.push((index, item));
     }
 
-    fn open_message(&mut self, out: &mut Vec<Event>) -> (String, usize) {
+    /// Opens the message item and the text or refusal part in it. Returns the item id, the
+    /// output index and the content index of the part.
+    fn open_part(&mut self, out: &mut Vec<Event>, refusal: bool) -> (String, usize, usize) {
         if self.message.is_none() {
             self.close_reasoning(out);
             let item_id = format!("msg_{}", random_token(12));
@@ -437,16 +471,40 @@ impl ChatDecoder {
                 json!({ "output_index": index, "item": {
                 "id": item_id, "type": "message", "role": "assistant", "status": "in_progress", "content": [] } }),
             );
-            self.emit(
-                out,
-                "response.content_part.added",
-                json!({ "item_id": item_id, "output_index": index,
-                "content_index": 0, "part": { "type": "output_text", "text": "", "annotations": [] } }),
-            );
-            self.message = Some((item_id, index, String::new(), String::new()));
+            self.message = Some(Message {
+                item_id,
+                index,
+                ..Message::default()
+            });
         }
-        let (item_id, index, _, _) = self.message.as_ref().expect("open");
-        (item_id.clone(), *index)
+        let message = self.message.as_mut().expect("open");
+        let slot = if refusal {
+            &mut message.refusal_part
+        } else {
+            &mut message.text_part
+        };
+        let (item_id, index) = (message.item_id.clone(), message.index);
+        let part_index = match *slot {
+            Some(part_index) => part_index,
+            None => {
+                let part_index = message.parts;
+                *slot = Some(part_index);
+                message.parts += 1;
+                let part = if refusal {
+                    json!({ "type": "refusal", "refusal": "" })
+                } else {
+                    json!({ "type": "output_text", "text": "", "annotations": [] })
+                };
+                self.emit(
+                    out,
+                    "response.content_part.added",
+                    json!({ "item_id": item_id, "output_index": index,
+                    "content_index": part_index, "part": part }),
+                );
+                part_index
+            }
+        };
+        (item_id, index, part_index)
     }
 
     fn open_reasoning(&mut self, out: &mut Vec<Event>) {
@@ -585,31 +643,33 @@ impl Decoder for ChatDecoder {
                 self.reasoning_delta(out, text);
             }
             if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
-                let (item_id, index) = self.open_message(out);
-                if let Some((_, _, all, _)) = self.message.as_mut() {
-                    all.push_str(text);
+                let (item_id, index, part) = self.open_part(out, false);
+                if let Some(message) = self.message.as_mut() {
+                    message.text.push_str(text);
                 }
                 self.emit(
                     out,
                     "response.output_text.delta",
-                    json!({ "item_id": item_id, "output_index": index, "content_index": 0, "delta": text }),
+                    json!({ "item_id": item_id, "output_index": index,
+                    "content_index": part, "delta": text }),
                 );
             }
             if let Some(text) = delta["refusal"].as_str().filter(|t| !t.is_empty()) {
-                let (item_id, index) = self.open_message(out);
-                if let Some((_, _, _, all)) = self.message.as_mut() {
-                    all.push_str(text);
+                let (item_id, index, part) = self.open_part(out, true);
+                if let Some(message) = self.message.as_mut() {
+                    message.refusal.push_str(text);
                 }
                 self.emit(
                     out,
                     "response.refusal.delta",
-                    json!({ "item_id": item_id, "output_index": index, "content_index": 0, "delta": text }),
+                    json!({ "item_id": item_id, "output_index": index,
+                    "content_index": part, "delta": text }),
                 );
             }
             for annotation in delta["annotations"].as_array().into_iter().flatten() {
                 let citation = &annotation["url_citation"];
                 if annotation["type"] == "url_citation" {
-                    let (item_id, index) = self.open_message(out);
+                    let (item_id, index, part) = self.open_part(out, false);
                     let converted = json!({ "type": "url_citation", "url": citation["url"], "title": citation["title"],
                                             "start_index": citation["start_index"], "end_index": citation["end_index"] });
                     self.annotations.push(converted.clone());
@@ -617,7 +677,7 @@ impl Decoder for ChatDecoder {
                         out,
                         "response.output_text.annotation.added",
                         json!({ "item_id": item_id, "output_index": index,
-                        "content_index": 0, "annotation": converted }),
+                        "content_index": part, "annotation": converted }),
                     );
                 }
             }

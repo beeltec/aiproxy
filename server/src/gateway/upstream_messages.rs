@@ -196,6 +196,13 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             });
         }
     }
+    // A limit above the model maximum is lowered to it (Anthropic refuses it).
+    if let (Some(max), Some(model_max)) = (body["max_tokens"].as_i64(), capabilities["max_output"].as_i64())
+        && max > model_max
+    {
+        body["max_tokens"] = json!(model_max);
+        fit_thinking_budget(body);
+    }
     if let Some(alias) = alias {
         if let Some(effort) = &alias.effort
             && body["output_config"]["effort"].is_null()
@@ -409,7 +416,11 @@ pub fn encode(
                 } else {
                     json!({ "type": "object" })
                 };
-                tools.push(json!({ "name": tool["name"], "description": tool["description"], "input_schema": schema }));
+                let mut function = json!({ "name": tool["name"], "input_schema": schema });
+                if let Some(description) = tool["description"].as_str() {
+                    function["description"] = json!(description);
+                }
+                tools.push(function);
             }
             "web_search" => {
                 let mut search =
@@ -558,6 +569,8 @@ pub struct MessagesDecoder {
     stop_reason: Option<String>,
     output: Vec<(usize, Value)>,
     service_tier: Option<String>,
+    /// `message_stop` arrived for the current upstream answer.
+    stopped: bool,
 }
 
 impl MessagesDecoder {
@@ -579,6 +592,7 @@ impl MessagesDecoder {
             stop_reason: None,
             output: Vec::new(),
             service_tier: None,
+            stopped: false,
         }
     }
 
@@ -932,8 +946,9 @@ impl MessagesDecoder {
         self.usage = Value::Null;
     }
 
+    /// A paused answer that ended with `message_stop`, so its usage is known.
     fn paused(&self) -> bool {
-        self.stop_reason.as_deref() == Some("pause_turn")
+        self.stopped && self.stop_reason.as_deref() == Some("pause_turn")
     }
 }
 
@@ -977,6 +992,7 @@ impl Decoder for MessagesDecoder {
                 }
             }
             "message_stop" => {
+                self.stopped = true;
                 self.add_usage();
                 if !self.paused() {
                     self.finish(out);
@@ -1005,6 +1021,7 @@ impl Decoder for MessagesDecoder {
             return None;
         }
         self.stop_reason = None;
+        self.stopped = false;
         Some(self.content.clone())
     }
 
