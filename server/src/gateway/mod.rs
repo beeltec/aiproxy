@@ -1,6 +1,7 @@
 //! The OpenAI- and Anthropic-compatible endpoints below `/v1`.
 
 mod auth;
+mod chat_api;
 mod codex;
 mod engine;
 mod error;
@@ -28,6 +29,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/models", get(list_models))
         .route("/responses", post(responses_api::create))
+        .route("/chat/completions", post(chat_api::create))
         .layer(middleware::from_fn_with_state(state, auth::authenticate))
         .layer(DefaultBodyLimit::max(MAX_BODY))
 }

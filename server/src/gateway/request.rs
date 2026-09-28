@@ -20,7 +20,7 @@ pub struct Prepared {
 pub async fn prepare(
     state: &AppState,
     key: &ApiKey,
-    body: Value,
+    mut body: Value,
     route_name: &'static str,
     client_format: &'static str,
     cache_hint: Option<&str>,
@@ -64,6 +64,7 @@ pub async fn prepare(
         ));
     }
     check_inputs(&body, &route.capabilities, &route.qualified)?;
+    clamp_effort(&mut body, &route.capabilities);
 
     let output_reserve = body["max_output_tokens"]
         .as_i64()
@@ -104,6 +105,35 @@ pub async fn prepare(
             reserved_tokens,
         },
     })
+}
+
+const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// An effort that the model does not support becomes the nearest supported one.
+fn clamp_effort(body: &mut Value, capabilities: &Value) {
+    let Some(supported) = capabilities["efforts"].as_array().filter(|list| !list.is_empty()) else {
+        return;
+    };
+    let Some(requested) = body["reasoning"]["effort"].as_str() else {
+        return;
+    };
+    if supported.iter().any(|e| e == requested) {
+        return;
+    }
+    let rank = |effort: &str| EFFORTS.iter().position(|e| *e == effort);
+    let Some(wanted) = rank(requested) else {
+        return;
+    };
+    let nearest = supported
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|e| rank(e).map(|r| (r.abs_diff(wanted), std::cmp::Reverse(r), e)))
+        .min()
+        .map(|(_, _, e)| e.to_owned());
+    if let Some(nearest) = nearest {
+        tracing::debug!(requested, %nearest, "reasoning effort changed to a supported value");
+        body["reasoning"]["effort"] = Value::String(nearest);
+    }
 }
 
 /// Server-side state (stored responses, conversations, provider files, background runs) would
