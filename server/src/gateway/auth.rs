@@ -28,6 +28,8 @@ const LAST_USED_INTERVAL_SECS: u64 = 60;
 #[derive(Clone, Debug)]
 pub struct ApiKey {
     pub id: i64,
+    /// Model patterns; empty means all models.
+    pub allowlist: Vec<String>,
 }
 
 /// Limits that live in memory: requests per minute and parallel requests, per key and in total.
@@ -38,6 +40,7 @@ pub struct KeyLimits {
 
 struct KeyState {
     rpm: Option<TokenBucket>,
+    tpm: Option<TokenBucket>,
     /// Requests of this key that are running now.
     active: Arc<AtomicUsize>,
     last_used_write: Option<Instant>,
@@ -49,6 +52,30 @@ struct ActiveGuard(Arc<AtomicUsize>);
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl KeyLimits {
+    /// Reserves tokens before a request. Returns the seconds to wait when the key's
+    /// tokens-per-minute budget is used up. A reservation is at most the whole budget, so a large
+    /// request can pass when the budget is full; its real usage then delays the next requests.
+    pub fn reserve_tokens(&self, key: i64, amount: i64) -> Result<(), u64> {
+        let mut keys = self.keys.lock().expect("key limits lock");
+        let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) else {
+            return Ok(());
+        };
+        let amount = (amount as f64).min(bucket.capacity);
+        bucket.take(amount)
+    }
+
+    /// Corrects a reservation with the real usage. The bucket may go below zero, which delays
+    /// the next requests.
+    pub fn settle_tokens(&self, key: i64, reserved: i64, used: i64) {
+        let mut keys = self.keys.lock().expect("key limits lock");
+        if let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) {
+            bucket.tokens += (reserved - used) as f64;
+            bucket.tokens = bucket.tokens.min(bucket.capacity);
+        }
     }
 }
 
@@ -110,7 +137,9 @@ struct Row {
     expires_at: Option<i64>,
     revoked_at: Option<i64>,
     rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
     concurrency_limit: Option<i64>,
+    allowlist: String,
 }
 
 /// The error format depends on the API the client speaks.
@@ -165,7 +194,8 @@ async fn admit(
     };
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT id, expires_at, revoked_at, rpm_limit, concurrency_limit FROM api_keys WHERE key_hash = ?",
+        "SELECT id, expires_at, revoked_at, rpm_limit, tpm_limit, concurrency_limit, allowlist
+         FROM api_keys WHERE key_hash = ?",
     )
     .bind(sha256(presented.as_bytes()))
     .fetch_optional(&state.db)
@@ -212,6 +242,7 @@ async fn admit(
         });
         let entry = keys.entry(row.id).or_insert_with(|| KeyState {
             rpm: None,
+            tpm: None,
             active: Arc::default(),
             last_used_write: None,
         });
@@ -220,6 +251,11 @@ async fn admit(
             (Some(bucket), Some(limit)) => bucket.set_capacity(limit),
             (None, Some(limit)) => entry.rpm = Some(TokenBucket::new(limit)),
             (_, None) => entry.rpm = None,
+        }
+        match (entry.tpm.as_mut(), row.tpm_limit) {
+            (Some(bucket), Some(limit)) => bucket.set_capacity(limit),
+            (None, Some(limit)) => entry.tpm = Some(TokenBucket::new(limit)),
+            (_, None) => entry.tpm = None,
         }
         if entry.active.load(Ordering::SeqCst) >= concurrency {
             return Err(limited(
@@ -254,7 +290,11 @@ async fn admit(
         }
     }
 
-    Ok((ApiKey { id: row.id }, (per_key, global)))
+    let key = ApiKey {
+        id: row.id,
+        allowlist: serde_json::from_str(&row.allowlist).unwrap_or_default(),
+    };
+    Ok((key, (per_key, global)))
 }
 
 /// Reads the key from `Authorization: Bearer` or `x-api-key`.

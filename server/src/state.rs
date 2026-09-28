@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::crypto::{PasswordHasher, SecretBox};
 use crate::gateway::{KeyLimits, RejectedCounter};
 use crate::rate_limit::SlidingWindow;
+use crate::usage::UsageWriter;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +35,7 @@ pub struct AppState {
     pub link_flows: Arc<LinkFlows>,
     /// Wakes the refresh scheduler after changes to the plans.
     pub schedule_changed: Arc<Notify>,
+    pub usage: UsageWriter,
 }
 
 /// Limits for login and setup attempts.
@@ -60,6 +62,7 @@ impl AppState {
             refresher: Arc::default(),
             link_flows: Arc::default(),
             schedule_changed: Arc::default(),
+            usage: UsageWriter::start(db.clone()),
             config: Arc::new(config),
             db,
             hasher: PasswordHasher::new(),

@@ -1,11 +1,17 @@
 //! The OpenAI- and Anthropic-compatible endpoints below `/v1`.
 
 mod auth;
+mod codex;
+mod engine;
 mod error;
 mod rejected;
+mod request;
+mod responses_api;
+mod routing;
+mod sse;
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde_json::{Value, json};
 
@@ -21,6 +27,7 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/models", get(list_models))
+        .route("/responses", post(responses_api::create))
         .layer(middleware::from_fn_with_state(state, auth::authenticate))
         .layer(DefaultBodyLimit::max(MAX_BODY))
 }
