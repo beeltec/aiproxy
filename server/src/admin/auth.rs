@@ -11,7 +11,7 @@ use utoipa_axum::routes;
 use super::admins::{validate_password, validate_username};
 use super::session::{self, AdminSession};
 use crate::client_ip::ClientIp;
-use crate::crypto::{random_token, sha256};
+use crate::crypto::{random_bytes, sha256};
 use crate::db::now;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::state::AppState;
@@ -56,7 +56,8 @@ pub async fn create_setup_token(db: &SqlitePool) -> anyhow::Result<String> {
     if admin_count(db).await? > 0 {
         anyhow::bail!("an admin exists already; setup is closed");
     }
-    let token = random_token(24);
+    // Hex, so the token never starts with "-" when it is pasted into a shell.
+    let token: String = random_bytes(20).iter().map(|b| format!("{b:02x}")).collect();
     let now = now();
     sqlx::query(
         "INSERT INTO setup_token (id, token_hash, created_at, expires_at) VALUES (1, ?, ?, ?)

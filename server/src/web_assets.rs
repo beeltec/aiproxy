@@ -33,8 +33,9 @@ impl WebAssets {
             .chain(script_hashes.iter().map(|h| format!("'sha256-{h}'")))
             .collect::<Vec<_>>()
             .join(" ");
+        // Styles allow inline: UI libraries (toasts, popups) add <style> elements at runtime.
         let csp = format!(
-            "default-src 'self'; script-src {script_src}; style-src 'self'; img-src 'self' data:; \
+            "default-src 'self'; script-src {script_src}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
              font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; \
              form-action 'self'; frame-ancestors 'none'"
         );

@@ -8,11 +8,15 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
+pub fn random_bytes(len: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    rand::rng().fill(&mut buf[..]);
+    buf
+}
+
 /// Random token as URL-safe base64 without padding.
 pub fn random_token(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    rand::rng().fill(&mut buf[..]);
-    URL_SAFE_NO_PAD.encode(buf)
+    URL_SAFE_NO_PAD.encode(random_bytes(bytes))
 }
 
 pub fn sha256(data: &[u8]) -> Vec<u8> {
