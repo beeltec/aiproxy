@@ -195,7 +195,11 @@ pub async fn complete_pkce(state: &AppState, flow: &str, session: i64, pasted_ur
         Err(message) => return failed(&message),
     };
     let Some((verifier, expected_state)) = state.link_flows.take_pkce(flow, session) else {
-        return failed("This sign-in expired or was already used. Start again.");
+        // A repeated callback (for example after a dropped request) gets the current state.
+        return state
+            .link_flows
+            .get(flow, session)
+            .unwrap_or_else(|| failed("This sign-in expired. Start again."));
     };
     if returned_state != expected_state {
         let result = failed("The address belongs to another sign-in. Start again.");

@@ -318,12 +318,13 @@ async fn attempt(state: &AppState, account: i64, trigger: Trigger) -> (Result<()
             .execute(&state.db)
             .await
             .map_err(db_failure);
-            if let Err(err) = updated {
-                return (Err(err), true);
-            }
             tracing::warn!(account, %message, "ChatGPT token refresh failed");
+            // Retries start even when the error could not be stored.
             if trigger != Trigger::Retry {
                 start_retries(state, account, generation);
+            }
+            if let Err(err) = updated {
+                return (Err(err), true);
             }
             Err(Failure::Temporary(message))
         }

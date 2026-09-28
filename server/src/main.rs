@@ -31,6 +31,7 @@ use crate::state::AppState;
 use crate::web_assets::WebAssets;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const REFRESH_DRAIN: Duration = Duration::from_secs(120);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -90,8 +91,9 @@ async fn serve() -> anyhow::Result<()> {
         result = server.into_future() => result?,
         () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
     }
-    // A refresh that is running must save its rotated token before the process ends.
-    if tokio::time::timeout(SHUTDOWN_GRACE, state.refresher.drain())
+    // A refresh that is running must save its rotated token before the process ends. The budget
+    // covers the 30 s OAuth request plus the save retries with their database waits.
+    if tokio::time::timeout(REFRESH_DRAIN, state.refresher.drain())
         .await
         .is_err()
     {
