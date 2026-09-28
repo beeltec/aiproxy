@@ -408,9 +408,16 @@ function LinkFlow({ onClose }: { onClose: () => void }) {
 			),
 		enabled: flow !== null,
 		refetchInterval: (query) =>
-			query.state.data?.status === "pending" ? 3000 : false,
+			query.state.status !== "error" && query.state.data?.status === "pending"
+				? 3000
+				: false,
+		retry: false,
 	});
-	const done = status.data?.status === "done";
+	// An expired flow answers 404; show it like a failed flow.
+	const current: Schemas["LinkStatus"] | undefined = status.error
+		? { status: "failed", message: status.error.message }
+		: status.data;
+	const done = current?.status === "done";
 
 	useEffect(() => {
 		if (done) {
@@ -435,10 +442,10 @@ function LinkFlow({ onClose }: { onClose: () => void }) {
 					<TabsTrigger value="browser">Sign in here</TabsTrigger>
 				</TabsList>
 				<TabsContent value="device" className="pt-3">
-					<DeviceLink onFlow={setFlow} status={status.data} />
+					<DeviceLink onFlow={setFlow} status={current} />
 				</TabsContent>
 				<TabsContent value="browser" className="pt-3">
-					<BrowserLink onFlow={setFlow} status={status.data} />
+					<BrowserLink onFlow={setFlow} status={current} />
 				</TabsContent>
 			</Tabs>
 			<DialogFooter>
@@ -520,7 +527,16 @@ function DeviceLink({
 				</li>
 			</ol>
 			{status?.status === "failed" ? (
-				<FlowMessage status={status} />
+				<div className="space-y-3">
+					<FlowMessage status={status} />
+					<Button
+						variant="outline"
+						disabled={start.isPending}
+						onClick={() => start.mutate()}
+					>
+						Start again
+					</Button>
+				</div>
 			) : (
 				<p className="flex items-center gap-2 text-sm text-muted-foreground">
 					<RefreshCwIcon className="size-3.5 animate-spin" />
@@ -567,7 +583,7 @@ function BrowserLink({
 				shows an error. That is expected: copy that whole address and paste it
 				here.
 			</p>
-			{start.data ? (
+			{start.data && failed?.status !== "failed" ? (
 				<Button
 					variant="outline"
 					className="w-fit"
@@ -587,9 +603,13 @@ function BrowserLink({
 					variant="outline"
 					className="w-fit"
 					disabled={start.isPending}
-					onClick={() => start.mutate()}
+					onClick={() => {
+						complete.reset();
+						setPasted("");
+						start.mutate();
+					}}
 				>
-					Start the sign-in
+					{start.data ? "Start again" : "Start the sign-in"}
 				</Button>
 			)}
 			{start.error && <FieldError>{start.error.message}</FieldError>}

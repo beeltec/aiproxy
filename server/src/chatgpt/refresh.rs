@@ -73,11 +73,13 @@ struct RefreshRow {
     credential_generation: i64,
     last_refresh_at: i64,
     last_refresh_failed_at: Option<i64>,
+    last_refresh_error: Option<String>,
     status: String,
 }
 
 /// Refreshes the tokens of an account.
 pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
+    let requested_at = now();
     let guard = if trigger == Trigger::Request {
         tokio::time::timeout(REQUEST_TIMEOUT, state.refresher.lock(account))
             .await
@@ -88,7 +90,7 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
 
     let row: Option<RefreshRow> = sqlx::query_as(
         "SELECT chatgpt_account_id, refresh_token_enc, credential_generation, last_refresh_at,
-             last_refresh_failed_at, status
+             last_refresh_failed_at, last_refresh_error, status
          FROM chatgpt_accounts WHERE id = ?",
     )
     .bind(account)
@@ -101,6 +103,7 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
         credential_generation: generation,
         last_refresh_at,
         last_refresh_failed_at: last_failed_at,
+        last_refresh_error,
         status,
     }) = row
     else {
@@ -108,6 +111,15 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
     };
     if status == "needs_relogin" {
         return Err(Failure::NeedsRelogin("the refresh token does not work any more".into()));
+    }
+    // A refresh that ended while this caller waited for the lock answers for it too.
+    if last_refresh_at >= requested_at {
+        return Ok(());
+    }
+    if last_failed_at.is_some_and(|at| at >= requested_at) {
+        return Err(Failure::Temporary(
+            last_refresh_error.unwrap_or_else(|| "the refresh failed".into()),
+        ));
     }
     let now = now();
     if trigger != Trigger::Manual && now - last_refresh_at < FRESH_SECS {
@@ -199,15 +211,44 @@ fn start_retries(state: &AppState, account: i64) {
     }
     let state = state.clone();
     tokio::spawn(async move {
+        let mut failing = true;
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
             match refresh(&state, account, Trigger::Retry).await {
-                Ok(()) | Err(Failure::NeedsRelogin(_)) => break,
+                Ok(()) | Err(Failure::NeedsRelogin(_)) => {
+                    failing = false;
+                    break;
+                }
                 Err(Failure::Temporary(_)) => continue,
             }
         }
+        if failing {
+            give_up(&state, account).await;
+        }
         state.refresher.retrying.lock().expect("retrying").remove(&account);
     });
+}
+
+/// After the last retry failed, the account needs a new login. Only if it still fails: a
+/// successful refresh or a re-link in the meantime keeps it active.
+async fn give_up(state: &AppState, account: i64) {
+    let result = sqlx::query(
+        "UPDATE chatgpt_accounts SET status = 'needs_relogin'
+         WHERE id = ? AND status = 'active' AND last_refresh_failed_at > last_refresh_at",
+    )
+    .bind(account)
+    .execute(&state.db)
+    .await;
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            tracing::warn!(
+                account,
+                "ChatGPT token refresh failed several times; the account needs a new login"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => tracing::error!(error = %err, "cannot mark the account"),
+    }
 }
 
 fn db_failure(err: sqlx::Error) -> Failure {

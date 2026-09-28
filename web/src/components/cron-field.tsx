@@ -30,13 +30,13 @@ export function CronField({
 }) {
 	const cron = useDebounced(value.trim(), 300);
 	const { data: settings } = useQuery(settingsQuery);
-	const zone = timeZone || settings?.time_zone || "UTC";
+	const zone = validZone(timeZone?.trim() || settings?.time_zone || "UTC");
 	const preview = useQuery({
-		queryKey: ["cron-preview", cron, timeZone],
+		queryKey: ["cron-preview", cron, zone],
 		queryFn: () =>
 			call(
 				api.POST("/settings/cron-preview", {
-					body: { cron, time_zone: timeZone },
+					body: { cron, time_zone: zone },
 				}),
 			),
 		enabled: cron !== "" && !disabled,
@@ -82,4 +82,14 @@ function useDebounced<T>(value: T, delay: number): T {
 		return () => clearTimeout(timer);
 	}, [value, delay]);
 	return debounced;
+}
+
+/** The browser cannot format dates for unknown zones; the server reports the error on save. */
+function validZone(zone: string): string {
+	try {
+		new Intl.DateTimeFormat("en-GB", { timeZone: zone });
+		return zone;
+	} catch {
+		return "UTC";
+	}
 }
