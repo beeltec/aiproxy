@@ -325,7 +325,7 @@ function KeyDialog({
 	const current = target === "new" ? null : target;
 	return (
 		<Dialog open={target !== null} onOpenChange={(next) => !next && onClose()}>
-			<DialogContent className="sm:max-w-lg">
+			<DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
 				{target !== null && (
 					// Remount per key, so the form starts with that key's values.
 					<KeyForm

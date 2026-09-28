@@ -1,6 +1,7 @@
 //! API key check and per-key limits for the gateway.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -36,11 +37,19 @@ pub struct KeyLimits {
 }
 
 struct KeyState {
-    rpm_limit: Option<i64>,
-    concurrency: usize,
     rpm: Option<TokenBucket>,
-    parallel: Arc<Semaphore>,
+    /// Requests of this key that are running now.
+    active: Arc<AtomicUsize>,
     last_used_write: Option<Instant>,
+}
+
+/// Counts one running request of a key until it is dropped.
+struct ActiveGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for KeyLimits {
@@ -68,12 +77,23 @@ impl TokenBucket {
         }
     }
 
-    /// Takes `amount` tokens, or returns the seconds until they are available.
-    fn take(&mut self, amount: f64) -> Result<(), u64> {
+    /// A changed limit keeps the tokens that are left (at most the new capacity).
+    fn set_capacity(&mut self, per_minute: i64) {
+        self.refill();
+        self.capacity = per_minute as f64;
+        self.tokens = self.tokens.min(self.capacity);
+    }
+
+    fn refill(&mut self) {
         let now = Instant::now();
         let refill = now.duration_since(self.updated).as_secs_f64() * self.capacity / 60.0;
         self.tokens = (self.tokens + refill).min(self.capacity);
         self.updated = now;
+    }
+
+    /// Takes `amount` tokens, or returns the seconds until they are available.
+    fn take(&mut self, amount: f64) -> Result<(), u64> {
+        self.refill();
         if self.tokens >= amount {
             self.tokens -= amount;
             Ok(())
@@ -130,7 +150,7 @@ async fn admit(
     state: &AppState,
     headers: &HeaderMap,
     format: ErrorFormat,
-) -> Result<(ApiKey, (OwnedSemaphorePermit, OwnedSemaphorePermit)), Rejection> {
+) -> Result<(ApiKey, (ActiveGuard, OwnedSemaphorePermit)), Rejection> {
     let unauthorized = |reason: Reason, message: &str| {
         (
             reason,
@@ -190,33 +210,37 @@ async fn admit(
         let concurrency = row.concurrency_limit.map_or(DEFAULT_CONCURRENCY, |limit| {
             usize::try_from(limit).unwrap_or(DEFAULT_CONCURRENCY)
         });
-        let entry = keys
-            .entry(row.id)
-            .or_insert_with(|| KeyState::new(row.rpm_limit, concurrency));
-        // A changed limit takes effect at once.
-        if entry.rpm_limit != row.rpm_limit || entry.concurrency != concurrency {
-            let last_used_write = entry.last_used_write;
-            *entry = KeyState::new(row.rpm_limit, concurrency);
-            entry.last_used_write = last_used_write;
+        let entry = keys.entry(row.id).or_insert_with(|| KeyState {
+            rpm: None,
+            active: Arc::default(),
+            last_used_write: None,
+        });
+        // The limits come from the database on each request, so a change takes effect at once.
+        match (entry.rpm.as_mut(), row.rpm_limit) {
+            (Some(bucket), Some(limit)) => bucket.set_capacity(limit),
+            (None, Some(limit)) => entry.rpm = Some(TokenBucket::new(limit)),
+            (_, None) => entry.rpm = None,
         }
-        let permit = entry.parallel.clone().try_acquire_owned().map_err(|_| {
-            limited(
+        if entry.active.load(Ordering::SeqCst) >= concurrency {
+            return Err(limited(
                 format!("This key has {concurrency} requests running. Wait for one to end."),
                 1,
-            )
-        })?;
+            ));
+        }
         if let Some(bucket) = entry.rpm.as_mut() {
             bucket
                 .take(1.0)
                 .map_err(|wait| limited("This key sent too many requests per minute.".into(), wait))?;
         }
+        entry.active.fetch_add(1, Ordering::SeqCst);
+        let guard = ActiveGuard(entry.active.clone());
         let write = entry
             .last_used_write
             .is_none_or(|at| at.elapsed().as_secs() >= LAST_USED_INTERVAL_SECS);
         if write {
             entry.last_used_write = Some(Instant::now());
         }
-        (permit, write)
+        (guard, write)
     };
 
     if write_last_used {
@@ -233,24 +257,14 @@ async fn admit(
     Ok((ApiKey { id: row.id }, (per_key, global)))
 }
 
-impl KeyState {
-    fn new(rpm_limit: Option<i64>, concurrency: usize) -> Self {
-        Self {
-            rpm_limit,
-            concurrency,
-            rpm: rpm_limit.map(TokenBucket::new),
-            parallel: Arc::new(Semaphore::new(concurrency)),
-            last_used_write: None,
-        }
-    }
-}
-
 /// Reads the key from `Authorization: Bearer` or `x-api-key`.
 fn presented_key(headers: &HeaderMap) -> Option<String> {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, key)| key);
     let x_api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
     bearer
         .or(x_api_key)

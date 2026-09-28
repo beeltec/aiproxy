@@ -60,6 +60,13 @@ impl RejectedCounter {
             .await;
             if let Err(err) = result {
                 tracing::warn!(error = %err, "cannot save rejected request counts");
+                // Keep the counts for the next flush.
+                *self
+                    .counts
+                    .lock()
+                    .expect("rejected lock")
+                    .entry((hour, reason))
+                    .or_default() += count;
             }
         }
     }
