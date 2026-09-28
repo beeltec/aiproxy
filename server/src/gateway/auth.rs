@@ -169,9 +169,11 @@ impl Admission {
 /// A client that takes no data for this long has stopped reading.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A response body and the time when it gave data that the server has not yet taken further.
+/// A response body, its slots, and the time when it gave data that the server has not yet
+/// taken further. The watchdog has only a weak link, so a dropped body frees the slots at once.
 struct Watched {
     body: Option<Body>,
+    admission: Admission,
     handed_out: Option<Instant>,
 }
 
@@ -181,6 +183,7 @@ struct Watched {
 fn watch(body: Body, admission: Admission) -> Body {
     let watched = Arc::new(Mutex::new(Watched {
         body: Some(body),
+        admission,
         handed_out: None,
     }));
     let link = Arc::downgrade(&watched);
@@ -193,7 +196,7 @@ fn watch(body: Body, admission: Admission) -> Body {
             let mut watched = watched.lock().expect("watch lock");
             if watched.handed_out.is_some_and(|at| at.elapsed() > WRITE_TIMEOUT) {
                 watched.body = None;
-                admission.release();
+                watched.admission.release();
                 return;
             }
         }
