@@ -59,8 +59,8 @@ async fn list_models(State(state): State<AppState>, Extension(key): Extension<Ap
     let models: Vec<(String, String)> = listed
         .into_iter()
         .filter(|model| {
-            let names: Vec<&str> = model.names.iter().map(String::as_str).collect();
-            routing::allowed(&key.allowlist, &names)
+            let bare: Vec<&str> = model.bare.iter().map(String::as_str).collect();
+            routing::allowed(&key.allowlist, &model.qualified, &bare)
         })
         .map(|model| (model.name, model.display_name))
         .collect();

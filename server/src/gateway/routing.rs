@@ -184,7 +184,8 @@ pub struct Listed {
     pub name: String,
     pub display_name: String,
     /// The names that the allowlist checks.
-    pub names: Vec<String>,
+    pub qualified: String,
+    pub bare: Vec<String>,
 }
 
 /// Enabled models as qualified names, and the aliases of enabled models.
@@ -204,7 +205,8 @@ pub async fn listed(db: &SqlitePool) -> Result<Vec<Listed>, sqlx::Error> {
     for (name, target) in aliases {
         if let Some((_, id, _)) = models.iter().find(|(prefix, id, _)| format!("{prefix}/{id}") == target) {
             out.push(Listed {
-                names: vec![name.clone(), target.clone(), id.clone()],
+                qualified: target.clone(),
+                bare: vec![name.clone(), id.clone()],
                 display_name: target,
                 name,
             });
@@ -213,7 +215,8 @@ pub async fn listed(db: &SqlitePool) -> Result<Vec<Listed>, sqlx::Error> {
     for (prefix, id, display_name) in models {
         let qualified = format!("{prefix}/{id}");
         out.push(Listed {
-            names: vec![qualified.clone(), id.clone()],
+            qualified: qualified.clone(),
+            bare: vec![id.clone()],
             display_name: display_name.unwrap_or_else(|| id.clone()),
             name: qualified,
         });
@@ -222,14 +225,10 @@ pub async fn listed(db: &SqlitePool) -> Result<Vec<Listed>, sqlx::Error> {
 }
 
 impl Route {
-    /// The names that an allowlist pattern may match: the name the client sent, the alias,
-    /// the qualified name and the upstream model id.
-    pub fn names(&self) -> Vec<&str> {
-        let mut names = vec![
-            self.requested.as_str(),
-            self.qualified.as_str(),
-            self.upstream_model.as_str(),
-        ];
+    /// Names without a connection prefix that an allowlist pattern may match: the alias and
+    /// the upstream model id (see `allowed`).
+    pub fn bare_names(&self) -> Vec<&str> {
+        let mut names = vec![self.upstream_model.as_str()];
         if let Some(alias) = &self.alias {
             names.push(&alias.name);
         }
@@ -239,8 +238,20 @@ impl Route {
 
 /// True when the key allows one of the names. An empty list allows all models. `*` matches any
 /// text.
-pub fn allowed(patterns: &[String], names: &[&str]) -> bool {
-    patterns.is_empty() || patterns.iter().any(|p| names.iter().any(|name| glob(p, name)))
+///
+/// A pattern with `/` names a connection, so it matches only the qualified name: an OpenRouter
+/// model id such as `openai/gpt-5` must not match the pattern of the `openai` connection. A
+/// pattern without `/` matches the bare names (alias, upstream id without `/`), and with `*` also
+/// the qualified name.
+pub fn allowed(patterns: &[String], qualified: &str, bare: &[&str]) -> bool {
+    patterns.is_empty()
+        || patterns.iter().any(|p| {
+            if p.contains('/') {
+                glob(p, qualified)
+            } else {
+                bare.iter().any(|name| !name.contains('/') && glob(p, name)) || (p.contains('*') && glob(p, qualified))
+            }
+        })
 }
 
 fn glob(pattern: &str, text: &str) -> bool {

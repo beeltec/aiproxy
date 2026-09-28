@@ -77,11 +77,13 @@ impl Connection {
 
     /// A request to `<base URL>/<path>` with the authentication headers of the provider. The
     /// base URL is checked again here, because a literal IP address does not reach the resolver.
+    /// `anthropic_version` is the version header of an Anthropic client, if it sent one.
     pub fn request(
         &self,
         state: &AppState,
         method: reqwest::Method,
         path: &str,
+        anthropic_version: Option<&str>,
     ) -> anyhow::Result<reqwest::RequestBuilder> {
         outbound::check_url(&self.base_url, state.config.allow_private_upstreams).map_err(anyhow::Error::msg)?;
         let url = format!("{}/{path}", self.base_url.as_str().trim_end_matches('/'));
@@ -89,7 +91,7 @@ impl Connection {
         Ok(match self.kind {
             Kind::Anthropic => request
                 .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION),
+                .header("anthropic-version", anthropic_version.unwrap_or(ANTHROPIC_VERSION)),
             Kind::OpenAi | Kind::OpenRouter => request.bearer_auth(&self.api_key),
         })
     }

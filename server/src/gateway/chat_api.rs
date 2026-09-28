@@ -41,6 +41,7 @@ pub async fn create(
             native: body.clone(),
             cache_hint: None,
             anthropic_beta: None,
+            anthropic_version: None,
         },
         admission,
     )

@@ -85,6 +85,8 @@ pub struct Job {
     pub native: Value,
     /// The `anthropic-beta` header of an Anthropic client.
     pub anthropic_beta: Option<String>,
+    /// The `anthropic-version` header of an Anthropic client.
+    pub anthropic_version: Option<String>,
     pub route_name: &'static str,
     pub client_format: &'static str,
     pub stream: bool,

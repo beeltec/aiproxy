@@ -124,7 +124,7 @@ async fn load(state: &AppState, connection_id: i64) -> anyhow::Result<Vec<Listed
 
 async fn get(state: &AppState, connection: &Connection, path: &str) -> anyhow::Result<Value> {
     let response = connection
-        .request(state, reqwest::Method::GET, path)?
+        .request(state, reqwest::Method::GET, path, None)?
         .timeout(TIMEOUT)
         .send()
         .await?;
@@ -216,7 +216,7 @@ fn openai_capabilities(catalog: &Catalog, id: &str) -> Value {
         out.insert("endpoints".into(), json!(list));
     }
     // Rules from the OpenAI model pages that the catalogs do not have (or have wrong).
-    if id.starts_with("gpt-audio") || id.contains("-audio-preview") {
+    if id.starts_with("gpt-audio") || id.contains("-audio-preview") || id.contains("-search-preview") {
         out.insert("endpoints".into(), json!(["chat"]));
     }
     if id.starts_with("gpt-6-astra") {

@@ -51,6 +51,7 @@ pub async fn create(
             native: body.clone(),
             cache_hint: hint,
             anthropic_beta: headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+            anthropic_version: headers.get("anthropic-version").and_then(|v| v.to_str().ok()),
         },
         admission,
     )
@@ -104,8 +105,18 @@ pub async fn count_tokens(
             id,
             kind: Kind::Anthropic,
         } => {
-            let beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
-            match provider::count_tokens(&state, id, &body, &route.upstream_model, beta).await {
+            let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+            let version = header("anthropic-version").filter(|v| request::is_api_version(v));
+            match provider::count_tokens(
+                &state,
+                id,
+                &body,
+                &route.upstream_model,
+                header("anthropic-beta"),
+                version,
+            )
+            .await
+            {
                 Ok(count) => (count, "anthropic", Some(id)),
                 Err(failure) => return error(failure),
             }

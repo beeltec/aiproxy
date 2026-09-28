@@ -26,6 +26,7 @@ pub struct Incoming<'a> {
     pub native: Value,
     pub cache_hint: Option<&'a str>,
     pub anthropic_beta: Option<&'a str>,
+    pub anthropic_version: Option<&'a str>,
 }
 
 /// Validates a Responses request body and builds the job.
@@ -41,6 +42,7 @@ pub async fn prepare(
         native,
         cache_hint,
         anthropic_beta,
+        anthropic_version,
     } = incoming;
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
@@ -132,6 +134,7 @@ pub async fn prepare(
             body,
             native,
             anthropic_beta: anthropic_beta.map(str::to_owned),
+            anthropic_version: anthropic_version.filter(|v| is_api_version(v)).map(str::to_owned),
             route_name: format,
             client_format: format,
             stream,
@@ -140,6 +143,11 @@ pub async fn prepare(
             _permits: permits,
         },
     })
+}
+
+/// An Anthropic API version such as `2023-06-01`.
+pub(super) fn is_api_version(version: &str) -> bool {
+    version.len() == 10 && version.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
 /// A body that is not valid JSON, as an error in the format of the client.
@@ -181,7 +189,7 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
             ));
         }
     };
-    if !routing::allowed(&key.allowlist, &route.names()) {
+    if !routing::allowed(&key.allowlist, &route.qualified, &route.bare_names()) {
         state.rejected.count(super::rejected::Reason::NotAllowed);
         return Err(Failure::new(
             StatusCode::FORBIDDEN,

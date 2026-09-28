@@ -143,6 +143,11 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                         if !message["tool_calls"].is_array() {
                             message["tool_calls"] = json!([]);
                         }
+                        if !reasoning_details.is_empty() {
+                            let mut details = message["reasoning_details"].as_array().cloned().unwrap_or_default();
+                            details.append(&mut reasoning_details);
+                            message["reasoning_details"] = Value::Array(details);
+                        }
                         message["tool_calls"].as_array_mut().expect("a list").push(call);
                     }
                     None => {
@@ -320,6 +325,8 @@ struct ToolCall {
     call_id: String,
     name: String,
     arguments: String,
+    /// `output_item.added` was sent (with the complete name).
+    announced: bool,
 }
 
 /// Chat chunks as Responses events. Order: reasoning, then text, then tool calls.
@@ -556,9 +563,24 @@ impl ChatDecoder {
         }
     }
 
+    fn announce(&mut self, out: &mut Vec<Event>, index: i64) {
+        let Some(tool) = self.tools.get_mut(&index).filter(|t| !t.announced) else {
+            return;
+        };
+        tool.announced = true;
+        let data = json!({ "output_index": tool.output_index, "item": {
+            "id": tool.item_id, "type": "function_call", "status": "in_progress", "call_id": tool.call_id,
+            "name": tool.name, "arguments": "" } });
+        self.emit(out, "response.output_item.added", data);
+    }
+
     fn finish(&mut self, out: &mut Vec<Event>) {
         self.close_reasoning(out);
         self.close_message(out);
+        let pending: Vec<i64> = self.tools.keys().copied().collect();
+        for index in pending {
+            self.announce(out, index);
+        }
         for tool in std::mem::take(&mut self.tools).into_values() {
             let item = json!({ "id": tool.item_id, "type": "function_call", "status": "completed",
                                "call_id": tool.call_id, "name": tool.name, "arguments": tool.arguments });
@@ -686,32 +708,30 @@ impl Decoder for ChatDecoder {
                 if !self.tools.contains_key(&index) {
                     self.close_reasoning(out);
                     self.close_message(out);
-                    let item_id = format!("fc_{}", random_token(12));
                     let output_index = self.next_index;
                     self.next_index += 1;
                     let call_id = call["id"]
                         .as_str()
                         .map_or_else(|| format!("call_{}", random_token(12)), str::to_owned);
-                    let name = call["function"]["name"].as_str().unwrap_or_default().to_owned();
-                    self.emit(
-                        out,
-                        "response.output_item.added",
-                        json!({ "output_index": output_index, "item": {
-                        "id": item_id, "type": "function_call", "status": "in_progress", "call_id": call_id,
-                        "name": name, "arguments": "" } }),
-                    );
                     self.tools.insert(
                         index,
                         ToolCall {
-                            item_id,
+                            item_id: format!("fc_{}", random_token(12)),
                             output_index,
                             call_id,
-                            name,
+                            name: String::new(),
                             arguments: String::new(),
+                            announced: false,
                         },
                     );
                 }
+                let tool = self.tools.get_mut(&index).expect("inserted");
+                // Some upstreams split the name; it is complete when the arguments start.
+                if let Some(name) = call["function"]["name"].as_str().filter(|_| !tool.announced) {
+                    tool.name.push_str(name);
+                }
                 if let Some(arguments) = call["function"]["arguments"].as_str().filter(|a| !a.is_empty()) {
+                    self.announce(out, index);
                     let tool = self.tools.get_mut(&index).expect("inserted");
                     tool.arguments.push_str(arguments);
                     let (item_id, output_index) = (tool.item_id.clone(), tool.output_index);

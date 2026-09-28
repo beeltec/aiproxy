@@ -37,6 +37,7 @@ pub async fn create(
             native: body,
             cache_hint: hint,
             anthropic_beta: None,
+            anthropic_version: None,
         },
         admission,
     )

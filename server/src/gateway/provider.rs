@@ -150,7 +150,16 @@ pub(super) async fn attempt(
     };
     let betas = merge_betas(betas, job.anthropic_beta.as_deref(), kind);
 
-    let response = send(state, &connection, wire, &body, &betas, stream).await?;
+    let response = send(
+        state,
+        &connection,
+        wire,
+        &body,
+        &betas,
+        stream,
+        job.anthropic_version.as_deref(),
+    )
+    .await?;
     outcome.generation_started = true;
     if let Some(opened) = opened.take() {
         let _ = opened.send(Ok(()));
@@ -218,7 +227,16 @@ pub(super) async fn attempt(
                             body["max_tokens"] = json!(left);
                             upstream_messages::fit_thinking_budget(&mut body);
                         }
-                        let response = send(state, &connection, wire, &body, &betas, true).await?;
+                        let response = send(
+                            state,
+                            &connection,
+                            wire,
+                            &body,
+                            &betas,
+                            true,
+                            job.anthropic_version.as_deref(),
+                        )
+                        .await?;
                         events = limited_events(response);
                         continue;
                     }
@@ -339,9 +357,10 @@ async fn send(
     body: &Value,
     betas: &[String],
     stream: bool,
+    anthropic_version: Option<&str>,
 ) -> Result<reqwest::Response, Failure> {
     let mut request = connection
-        .request(state, reqwest::Method::POST, wire.path())
+        .request(state, reqwest::Method::POST, wire.path(), anthropic_version)
         .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?
         .json(body);
     if stream {
@@ -451,6 +470,7 @@ pub(super) async fn count_tokens(
     body: &Value,
     upstream_model: &str,
     beta: Option<&str>,
+    version: Option<&str>,
 ) -> Result<i64, Failure> {
     let connection = Connection::load(state, connection_id).await.map_err(|err| {
         tracing::error!(connection = connection_id, error = %err, "cannot load the connection");
@@ -460,7 +480,7 @@ pub(super) async fn count_tokens(
     body["model"] = json!(upstream_model);
     let betas = merge_betas(Vec::new(), beta, Kind::Anthropic);
     let mut request = connection
-        .request(state, reqwest::Method::POST, "messages/count_tokens")
+        .request(state, reqwest::Method::POST, "messages/count_tokens", version)
         .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?
         .json(&body);
     if !betas.is_empty() {
@@ -528,6 +548,16 @@ async fn error_answer(response: reqwest::Response) -> Failure {
 fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>), Failure> {
     let mut body = job.native.clone();
     body["model"] = json!(job.route.upstream_model);
+    // The gateway writes into these fields, so they must be objects.
+    for field in ["stream_options", "reasoning", "output_config", "thinking"] {
+        if !body[field].is_null() && !body[field].is_object() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` must be an object."),
+            ));
+        }
+    }
     // OpenRouter fallbacks and provider routing would pick models that the key may not use.
     for field in ["models", "provider"] {
         if kind == Kind::OpenRouter && !body[field].is_null() {
