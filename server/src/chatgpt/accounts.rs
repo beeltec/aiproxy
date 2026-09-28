@@ -17,6 +17,8 @@ pub enum LinkError {
     OAuth(#[from] OAuthError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+    #[error("the account was removed during the sign-in; try again")]
+    Removed,
 }
 
 /// Stores the tokens of a new login. The same ChatGPT account updates its row (re-link); the
@@ -26,56 +28,69 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet) -> Result<i64, Link
     let identity = oauth::identity(&tokens.id_token)?;
     let id = &identity.account_id;
     let enc = |field: &str, value: &str| state.secrets.encrypt(&aad(id, field), value.as_bytes());
-    let now = now();
 
-    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM chatgpt_accounts WHERE chatgpt_account_id = ?")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
-    if let Some(row_id) = existing {
-        let _lock = state.refresher.lock(row_id).await;
-        sqlx::query(
-            "UPDATE chatgpt_accounts SET email = ?, plan_type = ?, access_token_enc = ?, refresh_token_enc = ?,
-                 id_token_enc = ?, access_expires_at = ?, credential_generation = credential_generation + 1,
-                 last_refresh_at = ?, last_refresh_error = NULL, last_refresh_failed_at = NULL, status = 'active'
-             WHERE id = ?",
+    // Two attempts: when a parallel first login inserted the account just now, update it.
+    for _ in 0..2 {
+        let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM chatgpt_accounts WHERE chatgpt_account_id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+        if let Some(row_id) = existing {
+            let _lock = state.refresher.lock(row_id).await;
+            let updated = sqlx::query(
+                "UPDATE chatgpt_accounts SET email = ?, plan_type = ?, access_token_enc = ?, refresh_token_enc = ?,
+                     id_token_enc = ?, access_expires_at = ?, credential_generation = credential_generation + 1,
+                     last_refresh_at = ?, last_refresh_error = NULL, last_refresh_failed_at = NULL, status = 'active'
+                 WHERE id = ?",
+            )
+            .bind(&identity.email)
+            .bind(&identity.plan_type)
+            .bind(enc("access_token", &tokens.access_token))
+            .bind(enc("refresh_token", &tokens.refresh_token))
+            .bind(enc("id_token", &tokens.id_token))
+            .bind(oauth::expires_at(&tokens.access_token))
+            .bind(now())
+            .bind(row_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected();
+            if updated == 0 {
+                return Err(LinkError::Removed);
+            }
+            tracing::info!(account = row_id, "ChatGPT account linked again");
+            return Ok(row_id);
+        }
+
+        // The first account becomes the primary account.
+        let inserted = sqlx::query_scalar(
+            "INSERT INTO chatgpt_accounts (chatgpt_account_id, email, plan_type, access_token_enc, refresh_token_enc,
+                 id_token_enc, access_expires_at, last_refresh_at, is_primary, failover_order, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                 NOT EXISTS (SELECT 1 FROM chatgpt_accounts),
+                 (SELECT COALESCE(MAX(failover_order), 0) + 1 FROM chatgpt_accounts), ?)
+             RETURNING id",
         )
+        .bind(id)
         .bind(&identity.email)
         .bind(&identity.plan_type)
         .bind(enc("access_token", &tokens.access_token))
         .bind(enc("refresh_token", &tokens.refresh_token))
         .bind(enc("id_token", &tokens.id_token))
         .bind(oauth::expires_at(&tokens.access_token))
-        .bind(now)
-        .bind(row_id)
-        .execute(&state.db)
-        .await?;
-        tracing::info!(account = row_id, "ChatGPT account linked again");
-        return Ok(row_id);
+        .bind(now())
+        .bind(now())
+        .fetch_one(&state.db)
+        .await;
+        match inserted {
+            Ok(row_id) => {
+                tracing::info!(account = row_id, "ChatGPT account linked");
+                return Ok(row_id);
+            }
+            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => continue,
+            Err(err) => return Err(err.into()),
+        }
     }
-
-    // The first account becomes the primary account.
-    let row_id: i64 = sqlx::query_scalar(
-        "INSERT INTO chatgpt_accounts (chatgpt_account_id, email, plan_type, access_token_enc, refresh_token_enc,
-             id_token_enc, access_expires_at, last_refresh_at, is_primary, failover_order, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-             NOT EXISTS (SELECT 1 FROM chatgpt_accounts),
-             (SELECT COALESCE(MAX(failover_order), 0) + 1 FROM chatgpt_accounts), ?)
-         RETURNING id",
-    )
-    .bind(id)
-    .bind(&identity.email)
-    .bind(&identity.plan_type)
-    .bind(enc("access_token", &tokens.access_token))
-    .bind(enc("refresh_token", &tokens.refresh_token))
-    .bind(enc("id_token", &tokens.id_token))
-    .bind(oauth::expires_at(&tokens.access_token))
-    .bind(now)
-    .bind(now)
-    .fetch_one(&state.db)
-    .await?;
-    tracing::info!(account = row_id, "ChatGPT account linked");
-    Ok(row_id)
+    Err(LinkError::Removed)
 }
 
 /// What an upstream call needs.

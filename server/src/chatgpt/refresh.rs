@@ -78,8 +78,16 @@ struct RefreshRow {
     status: String,
 }
 
-/// Refreshes the tokens of an account.
+/// Refreshes the tokens of an account. The work runs in its own task: when the caller goes away
+/// (for example a closed browser), the rotated token is still saved.
 pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
+    let state = state.clone();
+    tokio::spawn(async move { refresh_now(&state, account, trigger).await })
+        .await
+        .unwrap_or_else(|_| Err(Failure::Temporary("the refresh task stopped".into())))
+}
+
+async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result<(), Failure> {
     let requested_at = now();
     let guard = if trigger == Trigger::Request {
         tokio::time::timeout(REQUEST_TIMEOUT, state.refresher.lock(account))

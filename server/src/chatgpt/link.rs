@@ -121,7 +121,7 @@ pub async fn start_device(state: &AppState) -> Result<DeviceStart, String> {
             match oauth::poll_device_code(&state.http, &device).await {
                 Ok(None) => continue,
                 Ok(Some(tokens)) => {
-                    state.link_flows.set(&flow, finish(&state, &tokens).await);
+                    state.link_flows.set(&flow, finish(&state, &flow, &tokens).await);
                     return;
                 }
                 Err(err) => {
@@ -166,7 +166,7 @@ pub async fn complete_pkce(state: &AppState, flow: &str, pasted_url: &str) -> Fl
         failed("The address belongs to another sign-in. Start again.")
     } else {
         match oauth::exchange_code(&state.http, &code, &verifier, oauth::PKCE_REDIRECT).await {
-            Ok(tokens) => finish(state, &tokens).await,
+            Ok(tokens) => finish(state, flow, &tokens).await,
             Err(err) => failed(&format!("The sign-in failed: {err}")),
         }
     };
@@ -174,7 +174,11 @@ pub async fn complete_pkce(state: &AppState, flow: &str, pasted_url: &str) -> Fl
     result
 }
 
-async fn finish(state: &AppState, tokens: &oauth::TokenSet) -> FlowState {
+async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowState {
+    // The dialog was closed while the sign-in ran: do not save the account.
+    if state.link_flows.get(flow).is_none() {
+        return failed("The sign-in was cancelled.");
+    }
     match accounts::store_link(state, tokens).await {
         Ok(account) => {
             if let Err(err) = models::sync_account(state, account).await {

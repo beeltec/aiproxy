@@ -349,7 +349,9 @@ function AccountCard({
 							size="icon-xs"
 							variant="ghost"
 							aria-label="Move up"
-							disabled={index === 0 || move.isPending}
+							disabled={
+								index === 0 || accounts[index - 1]?.is_primary || move.isPending
+							}
 							onClick={() => move.mutate(-1)}
 						>
 							<ArrowUpIcon />
