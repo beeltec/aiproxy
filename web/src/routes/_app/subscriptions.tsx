@@ -62,7 +62,13 @@ import {
 	SelectValue,
 } from "#/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "#/components/ui/tabs";
-import { api, call, errorMessage, type Schemas } from "#/lib/api/client";
+import {
+	ApiError,
+	api,
+	call,
+	errorMessage,
+	type Schemas,
+} from "#/lib/api/client";
 import { formatDateTime, formatRelative } from "#/lib/format";
 import { settingsQuery } from "#/lib/settings";
 
@@ -463,7 +469,11 @@ function useFlowStatus(
 			query.state.status !== "error" && query.state.data?.status === "pending"
 				? 3000
 				: false,
-		retry: false,
+		// A 404 means the flow expired. Other errors (for example a 502 from a proxy) are
+		// temporary: the sign-in may still finish on the server.
+		retry: (count, error) =>
+			!(error instanceof ApiError && error.status === 404) && count < 10,
+		retryDelay: 3000,
 	});
 	const current: Schemas["LinkStatus"] | undefined = status.error
 		? { status: "failed", message: status.error.message }

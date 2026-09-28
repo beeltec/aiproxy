@@ -295,8 +295,10 @@ fn status_of(state: FlowState) -> LinkStatus {
     (status = OK, body = DeviceLink),
     (status = BAD_GATEWAY, body = ErrorBody),
 ))]
-async fn start_device_link(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<DeviceLink>> {
-    let start = link::start_device(&state).await.map_err(link_error)?;
+async fn start_device_link(current: AdminSession, State(state): State<AppState>) -> ApiResult<Json<DeviceLink>> {
+    let start = link::start_device(&state, current.session_id)
+        .await
+        .map_err(link_error)?;
     Ok(Json(DeviceLink {
         flow: start.flow,
         user_code: start.user_code,
@@ -305,8 +307,8 @@ async fn start_device_link(_: AdminSession, State(state): State<AppState>) -> Ap
 }
 
 #[utoipa::path(post, path = "/chatgpt/link/pkce", tag = "subscriptions", responses((status = OK, body = PkceLink)))]
-async fn start_pkce_link(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<PkceLink>> {
-    let start = link::start_pkce(&state).map_err(ApiError::too_many_requests)?;
+async fn start_pkce_link(current: AdminSession, State(state): State<AppState>) -> ApiResult<Json<PkceLink>> {
+    let start = link::start_pkce(&state, current.session_id).map_err(ApiError::too_many_requests)?;
     Ok(Json(PkceLink {
         flow: start.flow,
         authorize_url: start.authorize_url,

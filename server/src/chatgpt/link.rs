@@ -19,6 +19,8 @@ pub struct LinkFlows {
 
 struct Flow {
     started: Instant,
+    /// The admin session that started the flow. Tokens are saved only while it exists.
+    session: i64,
     state: FlowState,
 }
 
@@ -40,7 +42,7 @@ pub enum FlowState {
 }
 
 impl LinkFlows {
-    fn insert(&self, state: FlowState) -> Result<String, String> {
+    fn insert(&self, session: i64, state: FlowState) -> Result<String, String> {
         let mut flows = self.flows.lock().expect("link flows");
         flows.retain(|_, flow| flow.started.elapsed() < FLOW_TIMEOUT);
         if flows.len() >= MAX_FLOWS {
@@ -51,6 +53,7 @@ impl LinkFlows {
             id.clone(),
             Flow {
                 started: Instant::now(),
+                session,
                 state,
             },
         );
@@ -72,6 +75,14 @@ impl LinkFlows {
     }
 
     /// Removes the flow. A device flow that is still polling stops at its next step.
+    fn session_of(&self, id: &str) -> Option<i64> {
+        let flows = self.flows.lock().expect("link flows");
+        flows
+            .get(id)
+            .filter(|flow| flow.started.elapsed() < FLOW_TIMEOUT)
+            .map(|flow| flow.session)
+    }
+
     pub fn cancel(&self, id: &str) {
         self.flows.lock().expect("link flows").remove(id);
     }
@@ -95,11 +106,11 @@ pub struct DeviceStart {
 }
 
 /// Starts a device code login and polls in the background until the user confirms it.
-pub async fn start_device(state: &AppState) -> Result<DeviceStart, String> {
+pub async fn start_device(state: &AppState, session: i64) -> Result<DeviceStart, String> {
     let device = oauth::request_device_code(&state.http).await.map_err(|err| {
         format!("Cannot start the device login: {err}. Device login must be allowed in the ChatGPT security settings.")
     })?;
-    let flow = state.link_flows.insert(FlowState::Device)?;
+    let flow = state.link_flows.insert(session, FlowState::Device)?;
     let start = DeviceStart {
         flow: flow.clone(),
         user_code: device.user_code.clone(),
@@ -141,12 +152,15 @@ pub struct PkceStart {
     pub authorize_url: String,
 }
 
-pub fn start_pkce(state: &AppState) -> Result<PkceStart, String> {
+pub fn start_pkce(state: &AppState, session: i64) -> Result<PkceStart, String> {
     let pkce = oauth::start_pkce();
-    let flow = state.link_flows.insert(FlowState::Pkce {
-        verifier: pkce.verifier,
-        oauth_state: pkce.state,
-    })?;
+    let flow = state.link_flows.insert(
+        session,
+        FlowState::Pkce {
+            verifier: pkce.verifier,
+            oauth_state: pkce.state,
+        },
+    )?;
     Ok(PkceStart {
         flow,
         authorize_url: pkce.authorize_url,
@@ -174,12 +188,31 @@ pub async fn complete_pkce(state: &AppState, flow: &str, pasted_url: &str) -> Fl
     result
 }
 
-async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowState {
-    // The dialog was closed while the sign-in ran: do not save the account.
-    if state.link_flows.get(flow).is_none() {
-        return failed("The sign-in was cancelled.");
+/// A link flow may save its tokens only while it is open and its admin session exists.
+pub struct Guard<'a> {
+    state: &'a AppState,
+    flow: &'a str,
+}
+
+impl Guard<'_> {
+    pub async fn holds(&self) -> bool {
+        let Some(session) = self.state.link_flows.session_of(self.flow) else {
+            return false;
+        };
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sessions s JOIN admins a ON a.id = s.admin_id
+                 WHERE s.id = ? AND s.pending_second_factor = 0 AND s.expires_at > unixepoch() AND a.disabled = 0)",
+        )
+        .bind(session)
+        .fetch_one(&self.state.db)
+        .await
+        .unwrap_or(false)
     }
-    match accounts::store_link(state, tokens).await {
+}
+
+async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowState {
+    let guard = Guard { state, flow };
+    match accounts::store_link(state, tokens, &guard).await {
         Ok(account) => {
             if let Err(err) = models::sync_account(state, account).await {
                 tracing::warn!(account, error = %err, "cannot load the model list");
@@ -187,6 +220,7 @@ async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowS
             state.schedule_changed.notify_one();
             FlowState::Done { account }
         }
+        Err(accounts::LinkError::Cancelled) => failed("The sign-in was cancelled."),
         Err(err) => failed(&format!("Cannot save the account: {err}")),
     }
 }

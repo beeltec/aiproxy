@@ -3,6 +3,7 @@
 use crate::db::now;
 use crate::state::AppState;
 
+use super::link::Guard;
 use super::oauth::{self, OAuthError, TokenSet};
 
 /// Associated data for an encrypted token field. The ChatGPT account id never changes, so the
@@ -19,12 +20,15 @@ pub enum LinkError {
     Db(#[from] sqlx::Error),
     #[error("the account was removed during the sign-in; try again")]
     Removed,
+    #[error("the sign-in was cancelled")]
+    Cancelled,
 }
 
 /// Stores the tokens of a new login. The same ChatGPT account updates its row (re-link); the
 /// credential generation goes up, so a refresh that started before does not overwrite them.
 /// Returns the row id.
-pub async fn store_link(state: &AppState, tokens: &TokenSet) -> Result<i64, LinkError> {
+/// `guard` is checked right before each write, after the account lock is taken.
+pub async fn store_link(state: &AppState, tokens: &TokenSet, guard: &Guard<'_>) -> Result<i64, LinkError> {
     let identity = oauth::identity(&tokens.id_token)?;
     let id = &identity.account_id;
     let enc = |field: &str, value: &str| state.secrets.encrypt(&aad(id, field), value.as_bytes());
@@ -37,6 +41,9 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet) -> Result<i64, Link
             .await?;
         if let Some(row_id) = existing {
             let _lock = state.refresher.lock(row_id).await;
+            if !guard.holds().await {
+                return Err(LinkError::Cancelled);
+            }
             let updated = sqlx::query(
                 "UPDATE chatgpt_accounts SET email = ?, plan_type = ?, access_token_enc = ?, refresh_token_enc = ?,
                      id_token_enc = ?, access_expires_at = ?, credential_generation = credential_generation + 1,
@@ -61,6 +68,9 @@ pub async fn store_link(state: &AppState, tokens: &TokenSet) -> Result<i64, Link
             return Ok(row_id);
         }
 
+        if !guard.holds().await {
+            return Err(LinkError::Cancelled);
+        }
         // The first account becomes the primary account.
         let inserted = sqlx::query_scalar(
             "INSERT INTO chatgpt_accounts (chatgpt_account_id, email, plan_type, access_token_enc, refresh_token_enc,
