@@ -256,7 +256,9 @@ pub(super) async fn attempt(
                 if output_bytes > MAX_OUTPUT_BYTES {
                     return Err(too_large("The answer is larger than 32 MB."));
                 }
-                if event.data["item"]["type"] == "web_search_call" && event.data["item"]["action"]["type"] == "search" {
+                let item = &event.data["item"];
+                if item["type"] == "web_search_call" && item["action"]["type"] == "search" && item["status"] != "failed"
+                {
                     outcome.web_search_calls += 1;
                 }
                 output_items.push(event.data["item"].clone());

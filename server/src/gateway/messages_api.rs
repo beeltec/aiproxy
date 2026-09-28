@@ -335,11 +335,13 @@ fn tool(tool: &Value) -> Result<Value, String> {
 
 /// The backend search can only be limited to domains; it cannot block domains. `max_uses` has
 /// no backend equivalent, so it is not applied.
+/// Blocked domains stay in the tool; only native Anthropic requests may use them (see
+/// `request::prepare`).
 fn web_search_tool(tool: &Value) -> Result<Value, String> {
-    if tool["blocked_domains"].as_array().is_some_and(|list| !list.is_empty()) {
-        return Err("Web search with `blocked_domains` is not supported. Use `allowed_domains`.".into());
-    }
     let mut out = json!({ "type": "web_search" });
+    if let Some(domains) = tool["blocked_domains"].as_array().filter(|list| !list.is_empty()) {
+        out["blocked_domains"] = json!(domains);
+    }
     if let Some(domains) = tool["allowed_domains"].as_array().filter(|list| !list.is_empty()) {
         out["filters"] = json!({ "allowed_domains": domains });
     }

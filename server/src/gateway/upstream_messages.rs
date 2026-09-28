@@ -208,8 +208,12 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
         if alias.fast && body["speed"].is_null() && capabilities["fast"] == true {
             body["speed"] = json!("fast");
         }
-        drop_thinking_for_forced_tools(body, capabilities).map_err(bad)?;
     }
+    // An explicit effort also changes to what the model supports.
+    if let Some(effort) = body["output_config"]["effort"].as_str().map(str::to_owned) {
+        body["output_config"]["effort"] = json!(anthropic_effort(&effort, capabilities));
+    }
+    drop_thinking_for_forced_tools(body, capabilities).map_err(bad)?;
     let mut betas = Vec::new();
     if body["speed"] == "fast" {
         betas.push(FAST_BETA.to_owned());
@@ -553,6 +557,7 @@ pub struct MessagesDecoder {
     total: Tokens,
     stop_reason: Option<String>,
     output: Vec<(usize, Value)>,
+    service_tier: Option<String>,
 }
 
 impl MessagesDecoder {
@@ -573,6 +578,7 @@ impl MessagesDecoder {
             total: Tokens::default(),
             stop_reason: None,
             output: Vec::new(),
+            service_tier: None,
         }
     }
 
@@ -685,13 +691,20 @@ impl MessagesDecoder {
             "web_search_tool_result" => {
                 let tool_use_id = block["tool_use_id"].as_str().unwrap_or_default();
                 if let Some((item_id, index, query)) = self.searches.remove(tool_use_id) {
+                    // An error (for example `max_uses_exceeded`) is an object instead of a list;
+                    // such a search is failed and not billed.
+                    let status = if block["content"].is_array() {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
                     let sources: Vec<Value> = block["content"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .map(|r| json!({ "type": "url", "url": r["url"], "title": r["title"] }))
                         .collect();
-                    let item = json!({ "id": item_id, "type": "web_search_call", "status": "completed",
+                    let item = json!({ "id": item_id, "type": "web_search_call", "status": status,
                                        "action": { "type": "search", "query": query, "sources": sources } });
                     self.done(out, index, item);
                 }
@@ -891,6 +904,9 @@ impl MessagesDecoder {
         let mut response = json!({ "id": self.id, "object": "response", "created_at": self.created, "model": self.model,
                                    "status": if incomplete.is_some() { "incomplete" } else { "completed" },
                                    "output": output, "usage": self.total.to_responses_usage() });
+        if let Some(tier) = &self.service_tier {
+            response["service_tier"] = json!(tier);
+        }
         if let Some(reason) = incomplete {
             response["incomplete_details"] = json!({ "reason": reason });
         }
@@ -936,6 +952,9 @@ impl Decoder for MessagesDecoder {
         match data["type"].as_str().unwrap_or(event) {
             "message_start" => {
                 self.usage = data["message"]["usage"].clone();
+                if let Some(tier) = self.usage["service_tier"].as_str() {
+                    self.service_tier = Some(tier.to_owned());
+                }
                 if !self.started {
                     self.started = true;
                     self.model = data["message"]["model"].as_str().unwrap_or_default().to_owned();

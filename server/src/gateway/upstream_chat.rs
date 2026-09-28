@@ -324,6 +324,7 @@ pub struct ChatDecoder {
     done_items: Vec<(usize, Value)>,
     finish_reason: Option<String>,
     usage: Option<Tokens>,
+    service_tier: Option<String>,
 }
 
 impl ChatDecoder {
@@ -344,6 +345,7 @@ impl ChatDecoder {
             done_items: Vec::new(),
             finish_reason: None,
             usage: None,
+            service_tier: None,
         }
     }
 
@@ -533,6 +535,9 @@ impl ChatDecoder {
         if let Some(tokens) = &self.usage {
             response["usage"] = tokens.to_responses_usage();
         }
+        if let Some(tier) = &self.service_tier {
+            response["service_tier"] = json!(tier);
+        }
         let kind = if incomplete.is_some() {
             "response.incomplete"
         } else {
@@ -562,6 +567,9 @@ impl Decoder for ChatDecoder {
         }
         if data["usage"].is_object() {
             self.usage = Some(tokens(&data["usage"]));
+        }
+        if let Some(tier) = data["service_tier"].as_str() {
+            self.service_tier = Some(tier.to_owned());
         }
         for choice in data["choices"].as_array().into_iter().flatten() {
             let delta = &choice["delta"];

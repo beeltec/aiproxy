@@ -72,6 +72,19 @@ pub async fn prepare(
             ),
         ));
     }
+    // Anthropic can block search domains; the other upstreams cannot.
+    let blocked_domains = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "web_search" && !tool["blocked_domains"].is_null());
+    if blocked_domains && !(anthropic && format == "messages") {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            "Web search with `blocked_domains` works only with Anthropic models. Use `allowed_domains`.",
+        ));
+    }
     check_inputs(&body, &route.capabilities, &route.qualified)?;
     if let Some(alias) = &route.alias {
         apply_alias(&mut body, alias, format);
@@ -202,6 +215,15 @@ const SERVICE_TIERS: [&str; 6] = ["auto", "default", "flex", "scale", "priority"
 
 /// Only known values reach the backend and the usage rows.
 fn check_options(body: &Value) -> Result<(), Failure> {
+    for field in ["reasoning", "text"] {
+        if !body[field].is_null() && !body[field].is_object() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` must be an object."),
+            ));
+        }
+    }
     let known = |value: &Value, list: &[&str]| value.is_null() || value.as_str().is_some_and(|v| list.contains(&v));
     if !known(&body["reasoning"]["effort"], &EFFORTS) {
         return Err(Failure::new(
@@ -284,7 +306,10 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     let mut stored_reference = false;
     visit_parts(&body["input"], &mut |part| {
         let kind = part["type"].as_str().unwrap_or_default();
-        let provider_object = kind == "item_reference"
+        // An item with only an `id` is a reference too (its `type` is optional).
+        let id_only = part["type"].is_null() && part["role"].is_null() && !part["id"].is_null();
+        let provider_object = id_only
+            || kind == "item_reference"
             || (!part["file_id"].is_null() && kind.starts_with("input_"))
             || !part["container_id"].is_null()
             || kind.starts_with("code_interpreter")
