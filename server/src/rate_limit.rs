@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Counts events per key in a sliding time window. When a key reaches the limit, it stays
-/// blocked for one full window from that moment. Memory is bounded by `MAX_KEYS`.
+/// blocked for one full window from that moment. Memory is bounded by `MAX_KEYS`: when it is full,
+/// new keys are refused.
 pub struct SlidingWindow {
     window: Duration,
     limit: usize,
@@ -29,10 +30,6 @@ impl Entry {
     fn is_empty(&self) -> bool {
         self.events.is_empty() && self.blocked_since.is_none()
     }
-
-    fn last_seen(&self) -> Option<Instant> {
-        self.events.back().copied().max(self.blocked_since)
-    }
 }
 
 const MAX_KEYS: usize = 10_000;
@@ -51,7 +48,14 @@ impl SlidingWindow {
         let now = Instant::now();
         let mut entries = self.entries.lock().expect("rate limit lock");
         if !entries.contains_key(key) && entries.len() >= MAX_KEYS {
-            self.make_room(&mut entries, now);
+            entries.retain(|_, entry| {
+                entry.prune(now, self.window);
+                !entry.is_empty()
+            });
+            // Evicting a key could end an active lockout, so a new key is refused instead.
+            if entries.len() >= MAX_KEYS {
+                return false;
+            }
         }
         let entry = entries.entry(key.to_owned()).or_default();
         entry.prune(now, self.window);
@@ -78,21 +82,5 @@ impl SlidingWindow {
 
     pub fn clear(&self, key: &str) {
         self.entries.lock().expect("rate limit lock").remove(key);
-    }
-
-    fn make_room(&self, entries: &mut HashMap<String, Entry>, now: Instant) {
-        entries.retain(|_, entry| {
-            entry.prune(now, self.window);
-            !entry.is_empty()
-        });
-        if entries.len() >= MAX_KEYS {
-            let oldest = entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_seen())
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                entries.remove(&oldest);
-            }
-        }
     }
 }

@@ -31,6 +31,12 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // The database holds password hashes and secrets: new files are for the owner only.
+    #[cfg(unix)]
+    // SAFETY: umask only changes the file mode mask of this process.
+    unsafe {
+        libc::umask(0o077);
+    }
     match std::env::args().nth(1).as_deref() {
         None | Some("serve") => serve().await,
         Some("healthcheck") => healthcheck().await,

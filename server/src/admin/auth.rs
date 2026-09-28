@@ -101,9 +101,6 @@ async fn setup(
     }
     validate_username(&req.username)?;
     validate_password(&req.password)?;
-    let password_hash = state.hasher.hash(req.password).await?;
-    let hash_for_session = password_hash.clone();
-
     let forbidden = || {
         ApiError::new(
             StatusCode::FORBIDDEN,
@@ -111,6 +108,21 @@ async fn setup(
             "Setup is closed or the token is not valid.",
         )
     };
+    // Checked before the expensive hash; the transaction below checks again.
+    let token_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM setup_token WHERE id = 1 AND token_hash = ? AND expires_at > ?)
+             AND NOT EXISTS (SELECT 1 FROM admins)",
+    )
+    .bind(sha256(req.token.as_bytes()))
+    .bind(now())
+    .fetch_one(&state.db)
+    .await?;
+    if !token_valid {
+        return Err(forbidden());
+    }
+    let password_hash = state.hasher.hash(req.password).await?;
+    let hash_for_session = password_hash.clone();
+
     // Deleting the token is the first write, so a parallel setup waits here and then finds no token.
     let mut tx = state.db.begin().await?;
     let consumed = sqlx::query("DELETE FROM setup_token WHERE id = 1 AND token_hash = ? AND expires_at > ?")
