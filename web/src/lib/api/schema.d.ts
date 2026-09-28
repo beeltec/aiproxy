@@ -234,6 +234,55 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/api-keys": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_keys"];
+		put?: never;
+		post: operations["create_key"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/api-keys/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put: operations["update_key"];
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/api-keys/{id}/revoke": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/** Revokes a key. It stops working at once. Revoked keys stay listed for the usage history. */
+		post: operations["revoke_key"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/auth/login": {
 		parameters: {
 			query?: never;
@@ -428,6 +477,31 @@ export interface components {
 			second_factor: boolean;
 			username: string;
 		};
+		ApiKeyView: {
+			allowlist: string[];
+			/**
+			 * Format: int64
+			 * @description Parallel requests. `None`: the default of 8.
+			 */
+			concurrency_limit?: number | null;
+			/** Format: int64 */
+			created_at: number;
+			created_by?: string | null;
+			/** Format: int64 */
+			expires_at?: number | null;
+			/** Format: int64 */
+			id: number;
+			/** Format: int64 */
+			last_used_at?: number | null;
+			name: string;
+			prefix: string;
+			/** Format: int64 */
+			revoked_at?: number | null;
+			/** Format: int64 */
+			rpm_limit?: number | null;
+			/** Format: int64 */
+			tpm_limit?: number | null;
+		};
 		AssertionRequest: {
 			ceremony: string;
 			credential: unknown;
@@ -442,6 +516,11 @@ export interface components {
 		CreateAdmin: {
 			password: string;
 			username: string;
+		};
+		CreatedKey: {
+			api_key: components["schemas"]["ApiKeyView"];
+			/** @description The full key. It is shown only once. */
+			key: string;
 		};
 		ErrorBody: {
 			error: components["schemas"]["ErrorDetail"];
@@ -459,6 +538,20 @@ export interface components {
 			/** Format: int64 */
 			recovery_codes_left: number;
 			totp: boolean;
+		};
+		/** @description Settings of a key. The same body is used to create and to change a key. */
+		KeySettings: {
+			/** @description Model patterns, for example `chatgpt/*` or `anthropic-main/claude-opus-5-5`. Empty: all models. */
+			allowlist: string[];
+			/** Format: int64 */
+			concurrency_limit?: number | null;
+			/** Format: int64 */
+			expires_at?: number | null;
+			name: string;
+			/** Format: int64 */
+			rpm_limit?: number | null;
+			/** Format: int64 */
+			tpm_limit?: number | null;
 		};
 		LoginRequest: {
 			password: string;
@@ -987,6 +1080,116 @@ export interface operations {
 		};
 	};
 	reset_factors: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	list_keys: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ApiKeyView"][];
+				};
+			};
+		};
+	};
+	create_key: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["KeySettings"];
+			};
+		};
+		responses: {
+			201: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["CreatedKey"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	update_key: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["KeySettings"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ApiKeyView"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	revoke_key: {
 		parameters: {
 			query?: never;
 			header?: never;
