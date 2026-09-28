@@ -180,14 +180,25 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             return Err(bad(format!("`{field}` is not supported.")));
         }
     }
-    for tool in body["tools"].as_array_mut().into_iter().flatten() {
+    // `get_mut`: indexing a missing field would add it as null, which Anthropic refuses.
+    for tool in body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
         if tool["type"].as_str().is_some_and(|k| k.starts_with("web_search")) {
             direct_search(tool)?;
         }
     }
     // Thinking that the gateway made from OpenAI reasoning has no Anthropic signature.
-    for message in body["messages"].as_array_mut().into_iter().flatten() {
-        if let Some(content) = message["content"].as_array_mut() {
+    for message in body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
             content.retain(|block| {
                 !(block["type"] == "thinking"
                     && block["signature"]
@@ -206,11 +217,19 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
     if let Some(alias) = alias {
         if let Some(effort) = &alias.effort
             && body["output_config"]["effort"].is_null()
-            && body["thinking"].is_null()
         {
-            let client_max = body["max_tokens"].as_i64();
-            apply_effort(body, effort, client_max, capabilities);
-            drop_sampling_with_thinking(body);
+            match body["thinking"]["type"].as_str() {
+                None => {
+                    let client_max = body["max_tokens"].as_i64();
+                    apply_effort(body, effort, client_max, capabilities);
+                    drop_sampling_with_thinking(body);
+                }
+                // Adaptive thinking picks the mode, not the effort; the effort default still applies.
+                Some("adaptive") if capabilities["efforts"].as_array().is_some_and(|e| !e.is_empty()) => {
+                    body["output_config"]["effort"] = json!(anthropic_effort(effort, capabilities));
+                }
+                _ => {}
+            }
         }
         if alias.fast && body["speed"].is_null() && capabilities["fast"] == true {
             body["speed"] = json!("fast");
@@ -571,6 +590,8 @@ pub struct MessagesDecoder {
     service_tier: Option<String>,
     /// `message_stop` arrived for the current upstream answer.
     stopped: bool,
+    /// Upstream answers that ended with their usage.
+    answers: usize,
 }
 
 impl MessagesDecoder {
@@ -593,6 +614,7 @@ impl MessagesDecoder {
             output: Vec::new(),
             service_tier: None,
             stopped: false,
+            answers: 0,
         }
     }
 
@@ -934,6 +956,7 @@ impl MessagesDecoder {
 
     /// Adds the usage of one upstream answer to the total.
     fn add_usage(&mut self) {
+        self.answers += 1;
         let tokens = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
         let t = &mut self.total;
         t.input_text += tokens.input_text;
@@ -1012,8 +1035,9 @@ impl Decoder for MessagesDecoder {
         Ok(())
     }
 
+    /// Unknown until the first upstream answer ended; then the engine estimates instead.
     fn tokens(&self) -> Option<Tokens> {
-        Some(self.total.clone())
+        (self.answers > 0).then(|| self.total.clone())
     }
 
     fn continuation(&mut self) -> Option<Vec<Value>> {
