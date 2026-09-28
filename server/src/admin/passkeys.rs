@@ -230,20 +230,27 @@ async fn register(
         .finish_passkey_registration(&credential, &registration)
         .map_err(passkey_failed)?;
 
-    sqlx::query(
-        "INSERT INTO admin_passkeys (admin_id, name, credential_id, credential, created_at) VALUES (?, ?, ?, ?, ?)",
+    // The session must still exist: a factor reset at the same time ends it.
+    let inserted = sqlx::query(
+        "INSERT INTO admin_passkeys (admin_id, name, credential_id, credential, created_at)
+         SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ? AND pending_second_factor = 0)",
     )
     .bind(current.admin_id)
     .bind(name)
     .bind(passkey.cred_id().as_ref())
     .bind(serde_json::to_string(&passkey).map_err(|_| ApiError::internal())?)
     .bind(now())
+    .bind(current.session_id)
     .execute(&state.db)
     .await
     .map_err(|err| match err {
         sqlx::Error::Database(db) if db.is_unique_violation() => ApiError::conflict("This passkey is already added."),
         other => other.into(),
-    })?;
+    })?
+    .rows_affected();
+    if inserted == 0 {
+        return Err(ApiError::unauthorized());
+    }
     Ok(Json(FactorAdded {
         recovery_codes: factors::first_recovery_codes(&state.db, current.admin_id).await?,
     }))
@@ -310,14 +317,24 @@ async fn stored_passkeys(db: &SqlitePool, admin_id: i64) -> ApiResult<Vec<Stored
         .collect()
 }
 
-/// Saves the new sign counter and the last use. The update is refused when another login
-/// changed the stored credential in the meantime, so a lower counter never overwrites a higher one.
+/// Checks the sign counter against the current stored credential, then saves the new counter and
+/// the last use. A counter that does not go up points to a cloned authenticator (or a parallel
+/// login), so the login is refused. The update is also refused when another login changed the
+/// stored credential in the meantime.
 async fn record_use(
     db: &SqlitePool,
     stored: Stored,
     result: &webauthn_rs::prelude::AuthenticationResult,
 ) -> ApiResult<()> {
     let Stored { id, json, mut passkey } = stored;
+    let stored_counter = serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|value| value["cred"]["counter"].as_u64())
+        .unwrap_or(0);
+    // Authenticators without a counter always send 0.
+    if (result.counter() > 0 || stored_counter > 0) && u64::from(result.counter()) <= stored_counter {
+        return Err(passkey_failed("the sign counter did not go up"));
+    }
     passkey.update_credential(result);
     let updated =
         sqlx::query("UPDATE admin_passkeys SET credential = ?, last_used_at = ? WHERE id = ? AND credential = ?")

@@ -232,16 +232,25 @@ async fn login(
     let Some((admin_id, username, hash)) = admin.filter(|_| valid) else {
         return Err(invalid());
     };
-    // With a second factor, the password gives only a pending session.
-    let methods = factors::methods(&state.db, admin_id).await?;
-    let kind = if methods.any() { Kind::Pending } else { Kind::Full };
-    let client = ClientInfo {
-        ip: &ip.to_string(),
+    // With a second factor, the password gives only a pending session. If a factor was added
+    // just now, the full session insert fails and the login continues as pending.
+    let ip = ip.to_string();
+    let client = || ClientInfo {
+        ip: &ip,
         user_agent: user_agent(&headers),
     };
-    let cookie = session::create(&state.db, admin_id, Proof::Password(&hash), kind, client)
-        .await?
-        .ok_or_else(invalid)?;
+    let mut methods = factors::methods(&state.db, admin_id).await?;
+    let mut cookie = None;
+    if !methods.any() {
+        cookie = session::create(&state.db, admin_id, Proof::Password(&hash), Kind::Full, client()).await?;
+        if cookie.is_none() {
+            methods = factors::methods(&state.db, admin_id).await?;
+        }
+    }
+    if cookie.is_none() && methods.any() {
+        cookie = session::create(&state.db, admin_id, Proof::Password(&hash), Kind::Pending, client()).await?;
+    }
+    let cookie = cookie.ok_or_else(invalid)?;
 
     limits.failures.release(&ip_key);
     limits.failures.clear(&user_key);

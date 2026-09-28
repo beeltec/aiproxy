@@ -36,7 +36,8 @@ pub struct PendingSession {
 /// What must still be true when the session is stored. The check runs in the same SQL statement
 /// as the insert, so a password reset or a factor reset at the same time cannot leave a session.
 pub enum Proof<'a> {
-    /// The admin still has this password hash.
+    /// The admin still has this password hash. For a full session, the admin must also have no
+    /// second factor.
     Password(&'a str),
     /// This passkey of the admin still exists.
     Passkey(i64),
@@ -82,13 +83,25 @@ pub async fn create(
         Kind::Full => (false, ABSOLUTE_TIMEOUT),
         Kind::Pending => (true, PENDING_TIMEOUT),
     };
-    let (sql, proof_value) = match proof {
-        Proof::Password(hash) => (insert_session!("password_hash = ?"), ProofValue::Text(hash.to_owned())),
-        Proof::Passkey(id) => (
+    let (sql, proof_value) = match (proof, &kind) {
+        // A full session from a password alone is only possible without a second factor. The
+        // check is in the insert, so a factor added at the same time cannot be skipped.
+        (Proof::Password(hash), Kind::Full) => (
+            insert_session!(
+                "password_hash = ?
+                 AND NOT EXISTS (SELECT 1 FROM admin_totp t WHERE t.admin_id = admins.id AND t.confirmed = 1)
+                 AND NOT EXISTS (SELECT 1 FROM admin_passkeys p WHERE p.admin_id = admins.id)"
+            ),
+            ProofValue::Text(hash.to_owned()),
+        ),
+        (Proof::Password(hash), Kind::Pending) => {
+            (insert_session!("password_hash = ?"), ProofValue::Text(hash.to_owned()))
+        }
+        (Proof::Passkey(id), _) => (
             insert_session!("EXISTS (SELECT 1 FROM admin_passkeys p WHERE p.id = ? AND p.admin_id = admins.id)"),
             ProofValue::Id(id),
         ),
-        Proof::Pending(id) => (
+        (Proof::Pending(id), _) => (
             insert_session!(
                 "EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.admin_id = admins.id
                      AND s.pending_second_factor = 1 AND s.expires_at > unixepoch())"

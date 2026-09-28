@@ -298,8 +298,10 @@ async fn start_totp(current: AdminSession, State(state): State<AppState>) -> Api
         otpauth_url: totp.to_url().map_err(|e| internal(anyhow::anyhow!("{e}")))?,
         qr_png_base64: totp.to_qr_base64().map_err(|e| internal(anyhow::anyhow!("{e}")))?,
     };
+    // The session must still exist: a factor reset at the same time ends it.
     let stored = sqlx::query(
-        "INSERT INTO admin_totp (admin_id, secret_enc, confirmed, last_used_step, created_at) VALUES (?, ?, 0, 0, ?)
+        "INSERT INTO admin_totp (admin_id, secret_enc, confirmed, last_used_step, created_at)
+         SELECT ?, ?, 0, 0, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ? AND pending_second_factor = 0)
          ON CONFLICT (admin_id) DO UPDATE SET secret_enc = excluded.secret_enc,
              last_used_step = 0, created_at = excluded.created_at
          WHERE admin_totp.confirmed = 0",
@@ -307,6 +309,7 @@ async fn start_totp(current: AdminSession, State(state): State<AppState>) -> Api
     .bind(current.admin_id)
     .bind(state.secrets.encrypt(&totp_aad(current.admin_id), &secret))
     .bind(now())
+    .bind(current.session_id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -424,12 +427,14 @@ pub async fn first_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Opti
 
 /// Recovery codes are useless without a second factor, so they go with the last one.
 pub async fn after_factor_removed(db: &SqlitePool, admin_id: i64) -> Result<(), sqlx::Error> {
-    if !methods(db, admin_id).await?.any() {
-        sqlx::query("DELETE FROM admin_recovery_codes WHERE admin_id = ?")
-            .bind(admin_id)
-            .execute(db)
-            .await?;
-    }
+    sqlx::query(
+        "DELETE FROM admin_recovery_codes WHERE admin_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM admin_totp WHERE admin_id = ?1 AND confirmed = 1)
+             AND NOT EXISTS (SELECT 1 FROM admin_passkeys WHERE admin_id = ?1)",
+    )
+    .bind(admin_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -460,11 +465,7 @@ async fn new_recovery_codes(current: AdminSession, State(state): State<AppState>
     (status = NO_CONTENT),
     (status = NOT_FOUND, body = ErrorBody),
 ))]
-async fn reset_factors(
-    current: AdminSession,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<StatusCode> {
+async fn reset_factors(_: AdminSession, State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
     let mut tx = state.db.begin().await?;
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM admins WHERE id = ?")
         .bind(id)
@@ -480,8 +481,7 @@ async fn reset_factors(
     ] {
         sqlx::query(sql).bind(id).execute(&mut *tx).await?;
     }
-    let keep = (id == current.admin_id).then_some(current.session_id);
-    session::delete_all_of(&mut *tx, id, keep).await?;
+    session::delete_all_of(&mut *tx, id, None).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
