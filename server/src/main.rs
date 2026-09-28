@@ -34,6 +34,8 @@ use crate::web_assets::WebAssets;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const REFRESH_DRAIN: Duration = Duration::from_secs(120);
+/// Time to save the queued usage rows at shutdown.
+const USAGE_DRAIN: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -100,6 +102,9 @@ async fn serve() -> anyhow::Result<()> {
         .is_err()
     {
         tracing::warn!("token refreshes did not end in time");
+    }
+    if tokio::time::timeout(USAGE_DRAIN, state.usage.flush()).await.is_err() {
+        tracing::warn!("usage rows were not saved in time");
     }
     state.rejected.flush(&state.db).await;
     tracing::info!("aiproxy stopped");

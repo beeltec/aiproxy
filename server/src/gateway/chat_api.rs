@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::auth::ApiKey;
+use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::responses_api::error;
 use super::{request, sse};
@@ -19,6 +19,7 @@ use crate::state::AppState;
 pub async fn create(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
+    Extension(admission): Extension<Admission>,
     Json(body): Json<Value>,
 ) -> Response {
     let converted = match to_responses(&body) {
@@ -27,7 +28,7 @@ pub async fn create(
     };
     let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None).await {
+    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission.take()).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -224,13 +225,12 @@ fn usage(response: &Value) -> Value {
     })
 }
 
+/// A cut-off answer can contain unfinished tool calls, so the cut-off reason comes first.
 fn finish_reason(response: &Value, has_tool_calls: bool) -> &'static str {
-    if has_tool_calls {
-        return "tool_calls";
-    }
     match response["incomplete_details"]["reason"].as_str() {
         Some("max_output_tokens") => "length",
         Some("content_filter") => "content_filter",
+        _ if has_tool_calls => "tool_calls",
         _ => "stop",
     }
 }
@@ -239,6 +239,7 @@ fn finish_reason(response: &Value, has_tool_calls: bool) -> &'static str {
 pub fn from_response(response: &Value, model: &str) -> Value {
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut refusal = String::new();
     let mut tool_calls = Vec::new();
     for item in response["output"].as_array().into_iter().flatten() {
         match item["type"].as_str().unwrap_or_default() {
@@ -246,6 +247,9 @@ pub fn from_response(response: &Value, model: &str) -> Value {
                 for part in item["content"].as_array().into_iter().flatten() {
                     if let Some(t) = part["text"].as_str() {
                         text.push_str(t);
+                    }
+                    if let Some(t) = part["refusal"].as_str() {
+                        refusal.push_str(t);
                     }
                 }
             }
@@ -267,6 +271,9 @@ pub fn from_response(response: &Value, model: &str) -> Value {
         json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) } });
     if !reasoning.is_empty() {
         message["reasoning_content"] = json!(reasoning);
+    }
+    if !refusal.is_empty() {
+        message["refusal"] = json!(refusal);
     }
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls.clone());
@@ -339,6 +346,7 @@ impl ChunkEncoder {
                 let data = &event.data;
                 match event.kind.as_str() {
                     "response.output_text.delta" => out.push(self.chunk(json!({ "content": data["delta"] }), None)),
+                    "response.refusal.delta" => out.push(self.chunk(json!({ "refusal": data["delta"] }), None)),
                     "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                         out.push(self.chunk(json!({ "reasoning_content": data["delta"] }), None));
                     }

@@ -6,7 +6,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::auth::ApiKey;
+use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::error::{ErrorFormat, GatewayError};
 use super::{request, sse};
@@ -15,6 +15,7 @@ use crate::state::AppState;
 pub async fn create(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
+    Extension(admission): Extension<Admission>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -22,7 +23,7 @@ pub async fn create(
         .get("session_id")
         .or_else(|| headers.get("session-id"))
         .and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint).await {
+    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission.take()).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };

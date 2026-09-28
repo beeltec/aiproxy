@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-use super::auth::ApiKey;
+use super::auth::{ApiKey, Permits};
 use super::codex::{self, SendError};
 use super::routing::Route;
 use crate::chatgpt::refresh::{self, Trigger};
@@ -24,6 +24,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Events held before the attempt commits (then it commits anyway).
 const MAX_HELD_EVENTS: usize = 1000;
+const MAX_HELD_BYTES: usize = 1024 * 1024;
+/// Upper bound for everything one upstream answer may send.
+const MAX_UPSTREAM_BYTES: usize = 64 * 1024 * 1024;
 /// Refresh the access token when it expires within this time.
 const REFRESH_MARGIN: i64 = 5 * 60;
 
@@ -74,29 +77,30 @@ pub struct Job {
     pub cache_key: String,
     /// Tokens reserved for the tokens-per-minute limit.
     pub reserved_tokens: i64,
+    /// Concurrency slots. They stay taken until the engine ends.
+    pub permits: Option<Permits>,
 }
 
 /// Starts the request. Returns when the upstream accepted it, or with the error to send as
-/// the HTTP answer. The work runs in its own task, so a closed client connection does not stop
-/// the usage record.
+/// the HTTP answer. The work runs in its own task. A closed client stops the upstream request,
+/// and the usage is still recorded.
 pub async fn start(state: &AppState, job: Job) -> Result<mpsc::Receiver<Msg>, Failure> {
     let (opened_tx, opened_rx) = oneshot::channel();
     let (tx, rx) = mpsc::channel(64);
     let state = state.clone();
-    tokio::spawn(async move {
-        let _ = tokio::time::timeout(TOTAL_TIMEOUT, run(state, job, opened_tx, tx)).await;
-    });
+    tokio::spawn(run(state, job, opened_tx, tx));
     match opened_rx.await {
         Ok(Ok(())) => Ok(rx),
         Ok(Err(failure)) => Err(failure),
         Err(_) => Err(Failure::new(
-            StatusCode::GATEWAY_TIMEOUT,
-            "timeout",
-            "The request took too long.",
+            StatusCode::BAD_GATEWAY,
+            "server_error",
+            "The request stopped.",
         )),
     }
 }
 
+#[derive(Default)]
 struct Outcome {
     status: u16,
     error_kind: Option<String>,
@@ -105,6 +109,8 @@ struct Outcome {
     first_token_ms: Option<i64>,
     streamed_chars: usize,
     attempts: i64,
+    /// True after an upstream accepted the request, so tokens can be used.
+    generation_started: bool,
 }
 
 async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failure>>, tx: mpsc::Sender<Msg>) {
@@ -112,16 +118,19 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
     let mut opened = Some(opened);
     let mut outcome = Outcome {
         status: 200,
-        error_kind: None,
-        account: None,
-        final_response: None,
-        first_token_ms: None,
-        streamed_chars: 0,
-        attempts: 0,
+        ..Outcome::default()
     };
     let body = codex::backend_body(&job.body, &job.route.upstream_model, &job.cache_key);
 
-    let result = attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started).await;
+    let work = attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started);
+    let result = match tokio::time::timeout(TOTAL_TIMEOUT, work).await {
+        Ok(result) => result,
+        Err(_) => Err(Failure::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            "The request took longer than one hour.",
+        )),
+    };
     if let Err(failure) = result {
         outcome.status = failure.status.as_u16();
         outcome.error_kind = Some(failure.code.to_owned());
@@ -135,6 +144,7 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
         }
     }
     record_usage(&state, &job, &outcome, started).await;
+    drop(job.permits);
 }
 
 /// Tries the accounts in order until one answers, then streams its events.
@@ -164,6 +174,11 @@ async fn attempts(
 
     let mut last_failure = None;
     for account in accounts {
+        if tx.is_closed() {
+            outcome.status = 499;
+            outcome.error_kind = Some("client_closed".into());
+            return Ok(());
+        }
         outcome.attempts += 1;
         outcome.account = Some(account);
         if !fresh_token(state, account).await {
@@ -184,11 +199,7 @@ async fn attempts(
                 continue;
             }
             Err(SendError::Unauthorized) => {
-                last_failure = Some(Failure::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "account_unauthorized",
-                    "The ChatGPT account did not accept its token. Link it again.",
-                ));
+                last_failure = Some(unauthorized());
                 continue;
             }
             Err(SendError::Failed { status, message }) => {
@@ -196,6 +207,7 @@ async fn attempts(
                 return Err(Failure::new(status, "upstream_error", message));
             }
         };
+        outcome.generation_started = true;
         // The upstream accepted the request: the client gets a success status now.
         if let Some(opened) = opened.take() {
             let _ = opened.send(Ok(()));
@@ -221,6 +233,14 @@ async fn attempts(
             "No ChatGPT account is available.",
         )
     }))
+}
+
+fn unauthorized() -> Failure {
+    Failure::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "account_unauthorized",
+        "The ChatGPT account did not accept its token. Link it again.",
+    )
 }
 
 /// Renews the access token when it expires soon. False when that failed.
@@ -256,9 +276,14 @@ enum StreamEnd {
     Failed(Failure),
 }
 
-/// Events that carry output. Until one arrives, the attempt can still move to another account.
+/// Events that carry output or end the response. Until one arrives, the attempt can still move
+/// to another account.
 fn is_content(kind: &str) -> bool {
-    kind.ends_with(".delta") || kind == "response.output_item.done" || kind == "response.completed"
+    kind.ends_with(".delta") || kind == "response.output_item.done" || is_terminal(kind)
+}
+
+fn is_terminal(kind: &str) -> bool {
+    kind == "response.completed" || kind == "response.incomplete"
 }
 
 async fn stream_events(
@@ -271,13 +296,28 @@ async fn stream_events(
 ) -> StreamEnd {
     use eventsource_stream::Eventsource;
 
-    let mut events = response.bytes_stream().eventsource();
+    // Stops the stream when the upstream sends more than the byte limit.
+    let mut received = 0usize;
+    let bytes = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk?;
+        received += chunk.len();
+        if received > MAX_UPSTREAM_BYTES {
+            return Err(TooLarge.into());
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(chunk)
+    });
+    let mut events = bytes.eventsource();
     let mut held: Vec<Event> = Vec::new();
+    let mut held_bytes = 0usize;
     let mut committed = false;
     let mut output_items: Vec<Value> = Vec::new();
 
     loop {
-        let next = match tokio::time::timeout(IDLE_TIMEOUT, events.next()).await {
+        let next = tokio::select! {
+            () = tx.closed() => return StreamEnd::ClientGone,
+            next = tokio::time::timeout(IDLE_TIMEOUT, events.next()) => next,
+        };
+        let next = match next {
             Err(_) => {
                 return StreamEnd::Failed(Failure::new(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -301,7 +341,7 @@ async fn stream_events(
             }
             Ok(Some(Ok(event))) => event,
         };
-        let Ok(data) = serde_json::from_str::<Value>(&next.data) else {
+        let Ok(mut data) = serde_json::from_str::<Value>(&next.data) else {
             continue;
         };
         let kind = data["type"].as_str().unwrap_or(&next.event).to_owned();
@@ -326,11 +366,11 @@ async fn stream_events(
                 SendError::UsageLimit { message, .. } => {
                     Failure::new(StatusCode::TOO_MANY_REQUESTS, "usage_limit_reached", message)
                 }
-                SendError::Unauthorized => Failure::new(
-                    StatusCode::BAD_GATEWAY,
-                    "account_unauthorized",
-                    "The ChatGPT token was refused.",
-                ),
+                SendError::Unauthorized if !committed => {
+                    let _ = refresh::refresh(state, account, Trigger::Request).await;
+                    return StreamEnd::Retry(unauthorized());
+                }
+                SendError::Unauthorized => unauthorized(),
                 SendError::Failed { message, .. } => Failure::new(StatusCode::BAD_GATEWAY, "upstream_error", message),
             };
             return StreamEnd::Failed(failure);
@@ -345,15 +385,14 @@ async fn stream_events(
             }
             outcome.streamed_chars += data["delta"].as_str().map_or(0, str::len);
         }
-        let completed = kind == "response.completed" || kind == "response.incomplete";
+        let completed = is_terminal(&kind);
         if completed {
-            let mut final_response = data["response"].clone();
             // The backend may send an empty output list at the end; the items came one by one.
-            let empty = final_response["output"].as_array().is_none_or(Vec::is_empty);
+            let empty = data["response"]["output"].as_array().is_none_or(Vec::is_empty);
             if empty && !output_items.is_empty() {
-                final_response["output"] = Value::Array(std::mem::take(&mut output_items));
+                data["response"]["output"] = Value::Array(std::mem::take(&mut output_items));
             }
-            outcome.final_response = Some(final_response);
+            outcome.final_response = Some(data["response"].clone());
         }
 
         let event = Event { kind, data };
@@ -362,7 +401,8 @@ async fn stream_events(
                 return StreamEnd::ClientGone;
             }
         } else {
-            let commit = is_content(&event.kind) || held.len() >= MAX_HELD_EVENTS;
+            held_bytes += next.data.len();
+            let commit = is_content(&event.kind) || held.len() >= MAX_HELD_EVENTS || held_bytes >= MAX_HELD_BYTES;
             held.push(event);
             if commit {
                 committed = true;
@@ -384,14 +424,25 @@ async fn stream_events(
     }
 }
 
+#[derive(Debug)]
+struct TooLarge;
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the answer is larger than 64 MB")
+    }
+}
+
+impl std::error::Error for TooLarge {}
+
 async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: Instant) {
     let response = outcome.final_response.as_ref();
     let usage = response.map(|r| &r["usage"]).filter(|u| u.is_object());
     let (tokens, usage_status) = match usage {
         Some(usage) => (Tokens::from_openai(usage), "reported"),
-        None if outcome.streamed_chars > 0 || outcome.attempts > 0 => (
+        None if outcome.generation_started => (
             Tokens {
-                input_text: crate::tokens::count_request(&job.body) as i64,
+                input_text: crate::tokens::estimate(&job.body).await as i64,
                 output_text: (outcome.streamed_chars / 4) as i64,
                 ..Tokens::default()
             },
@@ -399,7 +450,11 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         ),
         None => (Tokens::default(), "none"),
     };
-    let used = tokens.input() + tokens.output();
+    // Without reported usage the real use is unknown, so keep at least the reservation.
+    let used = match usage_status {
+        "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
+        _ => tokens.input() + tokens.output(),
+    };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
     let web_search_calls = response.and_then(|r| r["output"].as_array()).map_or(0, |items| {

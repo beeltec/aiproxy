@@ -153,15 +153,17 @@ pub fn classify(status: u16, body: &str, retry_after: Option<i64>) -> SendError 
     } else {
         &json
     };
+    // Some errors have the generic type "error" and the real kind in `code`.
     let kind = error["type"]
         .as_str()
+        .filter(|kind| *kind != "error")
         .or_else(|| error["code"].as_str())
         .unwrap_or_default();
     let message = error["message"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| body.chars().take(300).collect());
-    if status == 401 {
+    if status == 401 || matches!(kind, "invalid_api_key" | "token_expired" | "authentication_error") {
         return SendError::Unauthorized;
     }
     if matches!(

@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde_json::{Map, Value, json};
 
-use super::auth::ApiKey;
+use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::error::{ErrorFormat, GatewayError};
 use super::{request, sse};
@@ -23,6 +23,7 @@ const SIGNATURE_PREFIX: &str = "aip1:";
 pub async fn create(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
+    Extension(admission): Extension<Admission>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -33,7 +34,8 @@ pub async fn create(
     let requested = body["model"].as_str().unwrap_or_default().to_owned();
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint).await {
+    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission.take()).await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -56,7 +58,7 @@ pub async fn create(
 /// Local estimate: the Anthropic count needs an Anthropic model.
 pub async fn count_tokens(Json(body): Json<Value>) -> Response {
     match to_responses(&body) {
-        Ok(converted) => Json(json!({ "input_tokens": crate::tokens::count_request(&converted) })).into_response(),
+        Ok(converted) => Json(json!({ "input_tokens": crate::tokens::estimate(&converted).await })).into_response(),
         Err(message) => error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     }
 }
@@ -345,15 +347,26 @@ fn usage(response: &Value) -> Value {
     })
 }
 
-fn stop_reason(response: &Value, has_tool_use: bool) -> &'static str {
-    if has_tool_use {
-        return "tool_use";
-    }
+/// A cut-off answer can contain an unfinished tool call, so the cut-off reason comes first.
+fn stop_reason(response: &Value, has_tool_use: bool, refused: bool) -> &'static str {
     match response["incomplete_details"]["reason"].as_str() {
         Some("max_output_tokens") => "max_tokens",
         Some("content_filter") => "refusal",
+        _ if refused => "refusal",
+        _ if has_tool_use => "tool_use",
         _ => "end_turn",
     }
+}
+
+/// True when a message item of the response has a refusal part.
+fn refused(response: &Value) -> bool {
+    response["output"].as_array().into_iter().flatten().any(|item| {
+        item["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|part| part["type"] == "refusal")
+    })
 }
 
 fn thinking_block(item: &Value, show: bool) -> Option<Value> {
@@ -395,7 +408,7 @@ pub fn from_response(response: &Value, model: &str, show_thinking: bool) -> Valu
             "reasoning" => content.extend(thinking_block(item, show_thinking)),
             "message" => {
                 for part in item["content"].as_array().into_iter().flatten() {
-                    if let Some(text) = part["text"].as_str() {
+                    if let Some(text) = part["text"].as_str().or_else(|| part["refusal"].as_str()) {
                         content.push(json!({ "type": "text", "text": text }));
                     }
                 }
@@ -417,7 +430,7 @@ pub fn from_response(response: &Value, model: &str, show_thinking: bool) -> Valu
         "role": "assistant",
         "model": model,
         "content": content,
-        "stop_reason": stop_reason(response, has_tool_use),
+        "stop_reason": stop_reason(response, has_tool_use, refused(response)),
         "stop_sequence": null,
         "usage": usage(response),
     })
@@ -528,7 +541,7 @@ impl EventEncoder {
                 out.push(Self::event(
                     "message_delta",
                     json!({ "type": "message_delta",
-                            "delta": { "stop_reason": stop_reason(&response, self.has_tool_use), "stop_sequence": null },
+                            "delta": { "stop_reason": stop_reason(&response, self.has_tool_use, refused(&response)), "stop_sequence": null },
                             "usage": usage }),
                 ));
                 out.push(Self::event("message_stop", json!({ "type": "message_stop" })));
@@ -569,7 +582,7 @@ impl EventEncoder {
                 }
                 _ => {}
             },
-            "response.output_text.delta" => {
+            "response.output_text.delta" | "response.refusal.delta" => {
                 if let Some(index) = self.open.get(&item_id).copied() {
                     Self::delta(out, index, json!({ "type": "text_delta", "text": data["delta"] }));
                 }

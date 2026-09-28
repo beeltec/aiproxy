@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Token counts as billing categories that do not overlap.
 #[derive(Clone, Debug, Default)]
@@ -86,9 +86,15 @@ pub struct Row {
     pub failover_attempts: i64,
 }
 
+enum Job {
+    Row(Box<Row>),
+    /// Answers when all rows queued before it are saved.
+    Flush(oneshot::Sender<()>),
+}
+
 #[derive(Clone)]
 pub struct UsageWriter {
-    sender: mpsc::Sender<Row>,
+    sender: mpsc::Sender<Job>,
 }
 
 const QUEUE: usize = 1000;
@@ -96,11 +102,18 @@ const QUEUE: usize = 1000;
 impl UsageWriter {
     /// Starts the writer task.
     pub fn start(db: SqlitePool) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Row>(QUEUE);
+        let (sender, mut receiver) = mpsc::channel::<Job>(QUEUE);
         tokio::spawn(async move {
-            while let Some(row) = receiver.recv().await {
-                if let Err(err) = insert(&db, &row).await {
-                    tracing::error!(error = %err, request = %row.request_id, "cannot save a usage row");
+            while let Some(job) = receiver.recv().await {
+                match job {
+                    Job::Row(row) => {
+                        if let Err(err) = insert(&db, &row).await {
+                            tracing::error!(error = %err, request = %row.request_id, "cannot save a usage row");
+                        }
+                    }
+                    Job::Flush(done) => {
+                        let _ = done.send(());
+                    }
                 }
             }
         });
@@ -109,8 +122,16 @@ impl UsageWriter {
 
     /// Queues a row. When the queue is full, this waits (no row is lost).
     pub async fn record(&self, row: Row) {
-        if self.sender.send(row).await.is_err() {
+        if self.sender.send(Job::Row(Box::new(row))).await.is_err() {
             tracing::error!("the usage writer stopped");
+        }
+    }
+
+    /// Waits until the rows queued before this call are saved.
+    pub async fn flush(&self) {
+        let (done, wait) = oneshot::channel();
+        if self.sender.send(Job::Flush(done)).await.is_ok() {
+            let _ = wait.await;
         }
     }
 }
@@ -123,7 +144,8 @@ async fn insert(db: &SqlitePool, row: &Row) -> Result<(), sqlx::Error> {
              status_code, error_kind, latency_ms, first_token_ms, usage_status, usage_exact,
              input_text, input_text_cached, input_audio, input_audio_cached, cache_write_5m,
              output_text, output_reasoning, output_audio, web_search_calls, failover_attempts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.request_id)
     .bind(row.time)

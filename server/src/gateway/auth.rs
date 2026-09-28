@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -56,16 +56,17 @@ impl Drop for ActiveGuard {
 }
 
 impl KeyLimits {
-    /// Reserves tokens before a request. Returns the seconds to wait when the key's
-    /// tokens-per-minute budget is used up. A reservation is at most the whole budget, so a large
-    /// request can pass when the budget is full; its real usage then delays the next requests.
-    pub fn reserve_tokens(&self, key: i64, amount: i64) -> Result<(), u64> {
+    /// Reserves tokens before a request and returns the amount taken, or the seconds to wait
+    /// when the key's tokens-per-minute budget is used up. A reservation is at most the whole
+    /// budget, so a large request can pass when the budget is full; its real usage then delays
+    /// the next requests.
+    pub fn reserve_tokens(&self, key: i64, amount: i64) -> Result<i64, u64> {
         let mut keys = self.keys.lock().expect("key limits lock");
         let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) else {
-            return Ok(());
+            return Ok(0);
         };
         let amount = (amount as f64).min(bucket.capacity);
-        bucket.take(amount)
+        bucket.take(amount).map(|()| amount as i64)
     }
 
     /// Corrects a reservation with the real usage. The bucket may go below zero, which delays
@@ -73,8 +74,8 @@ impl KeyLimits {
     pub fn settle_tokens(&self, key: i64, reserved: i64, used: i64) {
         let mut keys = self.keys.lock().expect("key limits lock");
         if let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) {
-            bucket.tokens += (reserved - used) as f64;
-            bucket.tokens = bucket.tokens.min(bucket.capacity);
+            bucket.refill();
+            bucket.tokens = (bucket.tokens + (reserved - used) as f64).min(bucket.capacity);
         }
     }
 }
@@ -151,9 +152,27 @@ pub fn error_format(path: &str, headers: &HeaderMap) -> ErrorFormat {
     }
 }
 
-/// Middleware for `/v1`: checks the key and the limits. The permits for parallel requests stay
-/// with the response body, so a streamed answer counts until it ends.
-pub async fn authenticate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+/// The concurrency slots of an admitted request. A handler that starts background work takes
+/// them, so they stay taken until that work ends; otherwise they stay with the response body.
+#[derive(Clone)]
+pub struct Admission(Arc<Mutex<Option<Permits>>>);
+
+pub struct Permits {
+    _active: ActiveGuard,
+    _global: OwnedSemaphorePermit,
+}
+
+impl Admission {
+    pub fn take(&self) -> Option<Permits> {
+        self.0.lock().expect("admission lock").take()
+    }
+}
+
+const MAX_BODY: usize = 64 * 1024 * 1024;
+const BODY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Middleware for `/v1`: checks the key and the limits, then reads the whole body within 120 s.
+pub async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let format = error_format(request.uri().path(), request.headers());
     let (key, permits) = match admit(&state, request.headers(), format).await {
         Ok(admitted) => admitted,
@@ -162,12 +181,40 @@ pub async fn authenticate(State(state): State<AppState>, mut request: Request, n
             return error.into_response();
         }
     };
+    let (parts, body) = request.into_parts();
+    let bytes = match tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, MAX_BODY)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return GatewayError::new(
+                format,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "The request is too large.",
+            )
+            .into_response();
+        }
+        Err(_) => {
+            return GatewayError::new(
+                format,
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                "The request body came too slowly.",
+            )
+            .into_response();
+        }
+    };
+    let mut request = Request::from_parts(parts, Body::from(bytes));
     tracing::debug!(api_key = key.id, "request admitted");
+    let admission = Admission(Arc::new(Mutex::new(Some(Permits {
+        _active: permits.0,
+        _global: permits.1,
+    }))));
     request.extensions_mut().insert(key);
+    request.extensions_mut().insert(admission.clone());
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
     let body = Body::from_stream(body.into_data_stream().map(move |chunk| {
-        let _held = &permits;
+        let _held = &admission;
         chunk
     }));
     Response::from_parts(parts, body)

@@ -16,6 +16,8 @@ pub struct Prepared {
     pub job: Job,
 }
 
+pub use super::auth::Permits;
+
 /// Validates a Responses request body and builds the job.
 pub async fn prepare(
     state: &AppState,
@@ -24,12 +26,14 @@ pub async fn prepare(
     route_name: &'static str,
     client_format: &'static str,
     cache_hint: Option<&str>,
+    permits: Option<Permits>,
 ) -> Result<Prepared, Failure> {
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
         .as_str()
         .ok_or_else(|| bad("The field `model` is missing."))?;
     reject_stored_state(&body)?;
+    reject_hosted_tools(&body)?;
 
     let route = match routing::resolve(&state.db, requested).await {
         Ok(route) => route,
@@ -70,17 +74,20 @@ pub async fn prepare(
         .as_i64()
         .unwrap_or(DEFAULT_OUTPUT_RESERVE)
         .clamp(1, MAX_OUTPUT_RESERVE);
-    let reserved_tokens = crate::tokens::count_request(&body) as i64 + output_reserve;
-    if let Err(wait) = state.key_limits.reserve_tokens(key.id, reserved_tokens) {
-        state.rejected.count(super::rejected::Reason::RateLimited);
-        let mut failure = Failure::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_exceeded",
-            "This key used its tokens per minute.",
-        );
-        failure.retry_after = Some(wait);
-        return Err(failure);
-    }
+    let estimate = crate::tokens::estimate(&body).await as i64 + output_reserve;
+    let reserved_tokens = match state.key_limits.reserve_tokens(key.id, estimate) {
+        Ok(reserved) => reserved,
+        Err(wait) => {
+            state.rejected.count(super::rejected::Reason::RateLimited);
+            let mut failure = Failure::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_exceeded",
+                "This key used its tokens per minute.",
+            );
+            failure.retry_after = Some(wait);
+            return Err(failure);
+        }
+    };
 
     let stream = body["stream"].as_bool().unwrap_or(false);
     // The same key for the same conversation start lets the backend reuse its prompt cache.
@@ -103,6 +110,7 @@ pub async fn prepare(
             stream,
             cache_key,
             reserved_tokens,
+            permits,
         },
     })
 }
@@ -136,6 +144,30 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
     }
 }
 
+/// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
+/// containers, connectors) through the shared account, and their charges are not tracked.
+const HOSTED_TOOLS: [&str; 5] = [
+    "function",
+    "custom",
+    "web_search",
+    "web_search_preview",
+    "image_generation",
+];
+
+fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
+    for tool in body["tools"].as_array().into_iter().flatten() {
+        let kind = tool["type"].as_str().unwrap_or_default();
+        if !HOSTED_TOOLS.contains(&kind) {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported_tool",
+                format!("The tool type `{kind}` is not supported. Use function tools, web search or image generation."),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Server-side state (stored responses, conversations, provider files, background runs) would
 /// be shared by all gateway keys through one account, so it is not supported.
 fn reject_stored_state(body: &Value) -> Result<(), Failure> {
@@ -154,7 +186,13 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     let mut stored_reference = false;
     visit_parts(&body["input"], &mut |part| {
         let kind = part["type"].as_str().unwrap_or_default();
-        if kind == "item_reference" || (!part["file_id"].is_null() && kind.starts_with("input_")) {
+        let provider_object = kind == "item_reference"
+            || (!part["file_id"].is_null() && kind.starts_with("input_"))
+            || !part["container_id"].is_null()
+            || kind.starts_with("code_interpreter")
+            || kind.starts_with("file_search")
+            || kind.starts_with("mcp");
+        if provider_object {
             stored_reference = true;
         }
     });

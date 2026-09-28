@@ -28,7 +28,7 @@ pub use rejected::RejectedCounter;
 use crate::state::AppState;
 
 pub const PREFIX: &str = "/v1";
-/// Images and audio can be large.
+/// Images and audio can be large (the key check reads the body with the same limit).
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
 pub fn router(state: AppState) -> Router<AppState> {
@@ -62,7 +62,7 @@ async fn list_models(State(state): State<AppState>, Extension(key): Extension<Ap
         .into_iter()
         .map(|(model_id, source, upstream_id, display_name, capabilities)| {
             let route = Route {
-                requested: format!("{source}/{upstream_id}"),
+                requested: upstream_id.clone(),
                 qualified: format!("{source}/{upstream_id}"),
                 upstream_model: upstream_id.clone(),
                 model_id,

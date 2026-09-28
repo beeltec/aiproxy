@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use serde_json::Value;
 use tiktoken_rs::CoreBPE;
+use tokio::sync::Semaphore;
 
 static O200K: LazyLock<CoreBPE> = LazyLock::new(|| tiktoken_rs::o200k_base().expect("o200k tables load"));
 
@@ -15,7 +16,7 @@ const MAX_TEXT: usize = 4 * 1024 * 1024;
 /// Rough cost of one image in tokens.
 const IMAGE_TOKENS: usize = 800;
 
-pub fn count_text(text: &str) -> usize {
+fn count_text(text: &str) -> usize {
     if text.len() > MAX_TEXT {
         return text.len() / 4;
     }
@@ -42,8 +43,20 @@ pub fn count_text(text: &str) -> usize {
     total + O200K.encode_ordinary(&text[piece_start..]).len()
 }
 
+/// At most this many estimates run at the same time, on the blocking thread pool.
+static SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
+
+/// Estimates the input tokens of a request body off the async threads.
+pub async fn estimate(body: &Value) -> usize {
+    let _slot = SLOTS.acquire().await.expect("the estimate semaphore is never closed");
+    let body = body.clone();
+    tokio::task::spawn_blocking(move || count_request(&body))
+        .await
+        .unwrap_or(0)
+}
+
 /// Estimates the input tokens of a request body: all text values, plus a fixed amount per image.
-pub fn count_request(body: &Value) -> usize {
+fn count_request(body: &Value) -> usize {
     let mut text = String::new();
     let mut images = 0;
     collect(body, &mut text, &mut images);
