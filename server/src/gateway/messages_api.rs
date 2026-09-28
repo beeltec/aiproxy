@@ -14,7 +14,9 @@ use serde_json::{Map, Value, json};
 use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::error::{ErrorFormat, GatewayError};
-use super::{request, sse};
+use super::routing::Upstream;
+use super::{provider, request, sse};
+use crate::connections::Kind;
 use crate::db::now;
 use crate::state::AppState;
 use crate::usage::{Row, Tokens};
@@ -40,7 +42,20 @@ pub async fn create(
     };
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission).await {
+    let prepared = match request::prepare(
+        &state,
+        &key,
+        request::Incoming {
+            format: "messages",
+            body: converted,
+            native: body.clone(),
+            cache_hint: hint,
+            anthropic_beta: headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+        },
+        admission,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -66,6 +81,7 @@ pub async fn create(
 pub async fn count_tokens(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
+    headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     let body = match body {
@@ -82,7 +98,20 @@ pub async fn count_tokens(
         Ok(route) => route,
         Err(failure) => return error(failure),
     };
-    let input_tokens = crate::tokens::estimate(&converted).await;
+    // Anthropic connections count themselves; other models get the local estimate.
+    let (input_tokens, upstream, connection_id) = match route.upstream {
+        Upstream::Connection {
+            id,
+            kind: Kind::Anthropic,
+        } => {
+            let beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
+            match provider::count_tokens(&state, id, &body, &route.upstream_model, beta).await {
+                Ok(count) => (count, "anthropic", Some(id)),
+                Err(failure) => return error(failure),
+            }
+        }
+        _ => (crate::tokens::estimate(&converted).await as i64, "local", None),
+    };
     state
         .usage
         .record(Row {
@@ -91,8 +120,10 @@ pub async fn count_tokens(
             api_key_id: key.id,
             route: "count_tokens",
             client_format: "messages",
-            upstream: "local",
+            upstream,
             chatgpt_account_id: None,
+            connection_id,
+            alias: route.alias.as_ref().map(|alias| alias.name.clone()),
             requested_model: route.requested,
             resolved_model: Some(route.qualified),
             effort: None,
@@ -264,9 +295,17 @@ fn tool(tool: &Value) -> Result<Value, String> {
     if kind.starts_with("web_search") {
         return web_search_tool(tool);
     }
+    // Client tools that Anthropic defines itself have no schema. They pass through only to
+    // Anthropic connections; the route check decides.
+    if ["bash_", "text_editor_", "computer_", "memory_"]
+        .iter()
+        .any(|p| kind.starts_with(p))
+    {
+        return Ok(json!({ "type": "anthropic_builtin", "name": tool["name"], "tool_type": kind }));
+    }
     if kind != "custom" {
         return Err(format!(
-            "The tool type `{kind}` works only with Anthropic models. Use a function tool with an input schema."
+            "The tool type `{kind}` is not supported. Use a function tool with an input schema."
         ));
     }
     Ok(json!({
@@ -612,7 +651,8 @@ async fn collect(mut rx: tokio::sync::mpsc::Receiver<Msg>, model: &str, show_thi
         match msg {
             Msg::Done(response) => return Json(from_response(&response, model, show_thinking)).into_response(),
             Msg::Failed(failure) => return error(failure),
-            Msg::Event(_) => {}
+            Msg::Native(body) => return Json(body).into_response(),
+            Msg::Event(_) | Msg::Raw(_) => {}
         }
     }
     error(Failure::new(
@@ -717,6 +757,7 @@ impl EventEncoder {
                 ));
                 out.push(Self::event("message_stop", json!({ "type": "message_stop" })));
             }
+            Msg::Raw(_) | Msg::Native(_) => {}
             Msg::Failed(failure) => {
                 let kind = match failure.status.as_u16() {
                     429 => "rate_limit_error",

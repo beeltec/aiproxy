@@ -2,10 +2,13 @@
 
 mod account;
 mod admins;
+mod aliases;
 mod api_keys;
 pub mod auth;
+mod connections;
 mod factors;
 mod instance_settings;
+mod models;
 mod passkeys;
 mod session;
 mod subscriptions;
@@ -42,6 +45,9 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(api_keys::router())
         .merge(subscriptions::router())
         .merge(instance_settings::router())
+        .merge(connections::router())
+        .merge(models::router())
+        .merge(aliases::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

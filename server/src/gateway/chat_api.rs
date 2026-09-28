@@ -32,7 +32,20 @@ pub async fn create(
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
+    let prepared = match request::prepare(
+        &state,
+        &key,
+        request::Incoming {
+            format: "chat",
+            body: converted,
+            native: body.clone(),
+            cache_hint: None,
+            anthropic_beta: None,
+        },
+        admission,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -356,7 +369,8 @@ async fn collect(mut rx: tokio::sync::mpsc::Receiver<Msg>, model: &str) -> Respo
         match msg {
             Msg::Done(response) => return Json(from_response(&response, model)).into_response(),
             Msg::Failed(failure) => return error(failure),
-            Msg::Event(_) => {}
+            Msg::Native(body) => return Json(body).into_response(),
+            Msg::Event(_) | Msg::Raw(_) => {}
         }
     }
     error(Failure::new(
@@ -459,6 +473,7 @@ impl ChunkEncoder {
                 }
                 out.push(sse::frame(None, "[DONE]"));
             }
+            Msg::Raw(_) | Msg::Native(_) => {}
             Msg::Failed(failure) => {
                 let data =
                     json!({ "error": { "message": failure.message, "type": "server_error", "code": failure.code } });

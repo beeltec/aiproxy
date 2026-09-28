@@ -14,8 +14,9 @@ use crate::chatgpt::link::LinkFlows;
 use crate::chatgpt::refresh::Refresher;
 use crate::client_ip::TrustedProxies;
 use crate::config::Config;
+use crate::connections::catalog::CatalogCache;
 use crate::crypto::{PasswordHasher, SecretBox};
-use crate::gateway::{KeyLimits, RejectedCounter};
+use crate::gateway::{KeyLimits, RejectedCounter, ThinkingCache};
 use crate::rate_limit::SlidingWindow;
 use crate::usage::UsageWriter;
 
@@ -33,6 +34,10 @@ pub struct AppState {
     pub rejected: Arc<RejectedCounter>,
     /// HTTP client for fixed upstreams (OpenAI, ChatGPT). It follows no redirects.
     pub http: reqwest::Client,
+    /// HTTP client for connection base URLs, with the outbound address policy.
+    pub upstream_http: reqwest::Client,
+    pub catalog: Arc<CatalogCache>,
+    pub thinking_cache: Arc<ThinkingCache>,
     pub refresher: Arc<Refresher>,
     pub link_flows: Arc<LinkFlows>,
     /// Wakes the refresh scheduler after changes to the plans.
@@ -65,6 +70,9 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(30))
                 .build()?,
+            upstream_http: crate::outbound::client(config.allow_private_upstreams)?,
+            catalog: Arc::default(),
+            thinking_cache: Arc::default(),
             refresher: Arc::default(),
             link_flows: Arc::default(),
             schedule_changed: Arc::default(),

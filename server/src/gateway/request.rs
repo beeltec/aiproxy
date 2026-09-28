@@ -1,11 +1,12 @@
 //! Checks and routing that all client formats share.
 
 use axum::http::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::auth::{Admission, ApiKey};
 use super::engine::{Failure, Job};
-use super::routing::{self, Route, RouteError};
+use super::routing::{self, Alias, Route, RouteError, Upstream};
+use crate::connections::Kind;
 use crate::state::AppState;
 
 /// Output tokens reserved for the tokens-per-minute limit when the client sets no maximum.
@@ -17,16 +18,30 @@ pub struct Prepared {
     pub job: Job,
 }
 
+/// A client request in the Responses form, with the original body.
+pub struct Incoming<'a> {
+    /// `responses`, `chat` or `messages`: the route and the client format.
+    pub format: &'static str,
+    pub body: Value,
+    pub native: Value,
+    pub cache_hint: Option<&'a str>,
+    pub anthropic_beta: Option<&'a str>,
+}
+
 /// Validates a Responses request body and builds the job.
 pub async fn prepare(
     state: &AppState,
     key: &ApiKey,
-    mut body: Value,
-    route_name: &'static str,
-    client_format: &'static str,
-    cache_hint: Option<&str>,
+    incoming: Incoming<'_>,
     permits: Admission,
 ) -> Result<Prepared, Failure> {
+    let Incoming {
+        format,
+        mut body,
+        native,
+        cache_hint,
+        anthropic_beta,
+    } = incoming;
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
         .as_str()
@@ -35,7 +50,32 @@ pub async fn prepare(
     reject_hosted_tools(&body)?;
     check_options(&body)?;
     let route = route(state, key, requested).await?;
+    let anthropic = matches!(
+        route.upstream,
+        Upstream::Connection {
+            kind: Kind::Anthropic,
+            ..
+        }
+    );
+    let builtin = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|tool| tool["type"] == "anthropic_builtin");
+    if let Some(tool) = builtin.filter(|_| !(anthropic && format == "messages")) {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            format!(
+                "The tool type `{}` works only with Anthropic models. Use a function tool with an input schema.",
+                tool["tool_type"].as_str().unwrap_or_default()
+            ),
+        ));
+    }
     check_inputs(&body, &route.capabilities, &route.qualified)?;
+    if let Some(alias) = &route.alias {
+        apply_alias(&mut body, alias);
+    }
     clamp_effort(&mut body, &route.capabilities);
 
     let output_reserve = body["max_output_tokens"]
@@ -73,8 +113,10 @@ pub async fn prepare(
             key: key.clone(),
             route,
             body,
-            route_name,
-            client_format,
+            native,
+            anthropic_beta: anthropic_beta.map(str::to_owned),
+            route_name: format,
+            client_format: format,
             stream,
             cache_key,
             reserved_tokens,
@@ -122,7 +164,7 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
             ));
         }
     };
-    if !routing::allowed(&key.allowlist, &route) {
+    if !routing::allowed(&key.allowlist, &route.names()) {
         state.rejected.count(super::rejected::Reason::NotAllowed);
         return Err(Failure::new(
             StatusCode::FORBIDDEN,
@@ -131,6 +173,23 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
         ));
     }
     Ok(route)
+}
+
+/// Alias defaults for values that the client did not set.
+pub(super) fn apply_alias(body: &mut Value, alias: &Alias) {
+    if let Some(effort) = &alias.effort
+        && body["reasoning"]["effort"].is_null()
+    {
+        body["reasoning"]["effort"] = json!(effort);
+    }
+    if let Some(summary) = &alias.summary
+        && body["reasoning"]["summary"].is_null()
+    {
+        body["reasoning"]["summary"] = json!(summary);
+    }
+    if alias.fast && body["service_tier"].is_null() {
+        body["service_tier"] = json!("priority");
+    }
 }
 
 const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
@@ -186,7 +245,7 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
 /// The ChatGPT backend refuses `web_search_preview`.
-const HOSTED_TOOLS: [&str; 3] = ["function", "custom", "web_search"];
+const HOSTED_TOOLS: [&str; 4] = ["function", "custom", "web_search", "anthropic_builtin"];
 
 fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
     for tool in body["tools"].as_array().into_iter().flatten() {

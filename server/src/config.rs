@@ -15,6 +15,8 @@ pub struct Config {
     pub trusted_proxies: TrustedProxies,
     /// Key for secrets at rest (AES-256-GCM).
     pub master_key: [u8; 32],
+    /// Connection base URLs may use http and private addresses.
+    pub allow_private_upstreams: bool,
 }
 
 impl Config {
@@ -36,6 +38,11 @@ impl Config {
 
         let trusted_proxies = TrustedProxies::parse(&optional("AIPROXY_TRUSTED_PROXIES").unwrap_or_default())?;
         let master_key = master_key()?;
+        let allow_private_upstreams = match optional("AIPROXY_ALLOW_PRIVATE_UPSTREAMS").as_deref() {
+            None | Some("false" | "0") => false,
+            Some("true" | "1") => true,
+            Some(_) => bail!("AIPROXY_ALLOW_PRIVATE_UPSTREAMS must be true or false"),
+        };
 
         Ok(Self {
             public_url,
@@ -43,6 +50,7 @@ impl Config {
             data_dir,
             trusted_proxies,
             master_key,
+            allow_private_upstreams,
         })
     }
 

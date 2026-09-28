@@ -28,7 +28,20 @@ pub async fn create(
         .get("session_id")
         .or_else(|| headers.get("session-id"))
         .and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission).await {
+    let prepared = match request::prepare(
+        &state,
+        &key,
+        request::Incoming {
+            format: "responses",
+            body: body.clone(),
+            native: body,
+            cache_hint: hint,
+            anthropic_beta: None,
+        },
+        admission,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -46,7 +59,7 @@ pub async fn create(
 fn encode_event(msg: Msg) -> Vec<bytes::Bytes> {
     match msg {
         Msg::Event(event) => vec![sse::frame(Some(&event.kind), &event.data.to_string())],
-        Msg::Done(_) => Vec::new(),
+        Msg::Done(_) | Msg::Raw(_) | Msg::Native(_) => Vec::new(),
         Msg::Failed(failure) => {
             let data = json!({ "type": "error", "code": failure.code, "message": failure.message });
             vec![sse::frame(Some("error"), &data.to_string())]
@@ -60,7 +73,8 @@ async fn collect(mut rx: tokio::sync::mpsc::Receiver<Msg>) -> Response {
         match msg {
             Msg::Done(response) => return Json(response).into_response(),
             Msg::Failed(failure) => return error(failure),
-            Msg::Event(_) => {}
+            Msg::Native(body) => return Json(body).into_response(),
+            Msg::Event(_) | Msg::Raw(_) => {}
         }
     }
     error(Failure::new(

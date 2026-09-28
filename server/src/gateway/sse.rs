@@ -29,6 +29,7 @@ pub fn response(
                 next = tokio::time::timeout(PING_AFTER, rx.recv()) => next,
             };
             let chunks = match next {
+                Ok(Some(Msg::Raw(frame))) => vec![frame],
                 Ok(Some(msg)) => encode(msg),
                 Ok(None) => return,
                 Err(_) => vec![Bytes::from_static(ping.as_bytes())],
