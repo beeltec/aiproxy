@@ -32,7 +32,7 @@ pub async fn create(
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission.clone()).await {
+    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -44,7 +44,7 @@ pub async fn create(
     };
     if stream {
         let mut encoder = ChunkEncoder::new(requested, include_usage);
-        return sse::response(rx, move |msg| encoder.encode(msg), ": ping\n\n", admission);
+        return sse::response(rx, move |msg| encoder.encode(msg), ": ping\n\n");
     }
     collect(rx, &requested).await
 }
@@ -156,10 +156,10 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
             out.insert("tool_choice".into(), json!(choice));
         }
         Value::Object(choice) if choice.get("type").and_then(Value::as_str) == Some("function") => {
-            out.insert(
-                "tool_choice".into(),
-                json!({ "type": "function", "name": choice["function"]["name"] }),
-            );
+            let Some(name) = choice.get("function").and_then(|f| f["name"].as_str()) else {
+                return Err("`tool_choice.function.name` is missing.".into());
+            };
+            out.insert("tool_choice".into(), json!({ "type": "function", "name": name }));
         }
         _ => {}
     }

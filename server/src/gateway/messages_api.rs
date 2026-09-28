@@ -40,11 +40,10 @@ pub async fn create(
     };
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
-    let prepared =
-        match request::prepare(&state, &key, converted, "messages", "messages", hint, admission.clone()).await {
-            Ok(prepared) => prepared,
-            Err(failure) => return error(failure),
-        };
+    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission).await {
+        Ok(prepared) => prepared,
+        Err(failure) => return error(failure),
+    };
     let stream = prepared.job.stream;
     let requested = prepared.job.route.requested.clone();
     let rx = match engine::start(&state, prepared.job).await {
@@ -57,7 +56,6 @@ pub async fn create(
             rx,
             move |msg| encoder.encode(msg),
             "event: ping\ndata: {\"type\": \"ping\"}\n\n",
-            admission,
         );
     }
     collect(rx, &requested, show_thinking).await

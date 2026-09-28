@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
 
 use crate::chatgpt::{accounts, backend};
@@ -155,8 +156,26 @@ pub async fn send(state: &AppState, account: i64, body: &Value) -> Result<reqwes
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
-    let text = response.text().await.unwrap_or_default();
+    let text = error_text(response).await;
     Err(classify(status.as_u16(), &text, retry_after))
+}
+
+/// Reads at most 1 MB of an error body, within 30 s.
+async fn error_text(response: reqwest::Response) -> String {
+    const LIMIT: usize = 1024 * 1024;
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    let read = async {
+        while let Some(Ok(chunk)) = chunks.next().await {
+            body.extend_from_slice(&chunk);
+            if body.len() >= LIMIT {
+                body.truncate(LIMIT);
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(30), read).await;
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Maps an error answer (HTTP body or a `response.failed` event) to a `SendError`.

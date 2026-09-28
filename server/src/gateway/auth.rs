@@ -1,16 +1,17 @@
 //! API key check and per-key limits for the gateway.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::error::{ErrorFormat, GatewayError};
@@ -160,10 +161,61 @@ pub struct Admission {
 }
 
 impl Admission {
-    /// Frees the slots now, for a response that the client stopped reading.
-    pub fn release(&self) {
+    fn release(&self) {
         self.slots.lock().expect("admission lock").take();
     }
+}
+
+/// A client that takes no data for this long has stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A response body and the time when it gave data that the server has not yet taken further.
+struct Watched {
+    body: Option<Body>,
+    handed_out: Option<Instant>,
+}
+
+/// Wraps the response body. When the server asks for no more data within the write timeout
+/// after a frame, the client has stopped reading: the body is dropped (which stops the work of
+/// the request) and the slots become free.
+fn watch(body: Body, admission: Admission) -> Body {
+    let watched = Arc::new(Mutex::new(Watched {
+        body: Some(body),
+        handed_out: None,
+    }));
+    let link = Arc::downgrade(&watched);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let Some(watched) = link.upgrade() else {
+                return;
+            };
+            let mut watched = watched.lock().expect("watch lock");
+            if watched.handed_out.is_some_and(|at| at.elapsed() > WRITE_TIMEOUT) {
+                watched.body = None;
+                admission.release();
+                return;
+            }
+        }
+    });
+    Body::from_stream(futures_util::stream::poll_fn(move |cx| {
+        let mut watched = watched.lock().expect("watch lock");
+        let Some(body) = watched.body.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let next = loop {
+            match Pin::new(&mut *body).poll_frame(cx) {
+                // Trailers are not used by the gateway.
+                Poll::Ready(Some(Ok(frame))) if !frame.is_data() => {}
+                Poll::Ready(Some(frame)) => break Poll::Ready(Some(frame.map(|f| f.into_data().unwrap_or_default()))),
+                Poll::Ready(None) => break Poll::Ready(None),
+                Poll::Pending => break Poll::Pending,
+            }
+        };
+        // Waiting for data is not a stall; a frame or the end must be taken in time.
+        watched.handed_out = if next.is_pending() { None } else { Some(Instant::now()) };
+        next
+    }))
 }
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
@@ -210,11 +262,7 @@ pub async fn authenticate(State(state): State<AppState>, request: Request, next:
     request.extensions_mut().insert(admission.clone());
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
-    let body = Body::from_stream(body.into_data_stream().map(move |chunk| {
-        let _held = &admission;
-        chunk
-    }));
-    Response::from_parts(parts, body)
+    Response::from_parts(parts, watch(body, admission))
 }
 
 type Rejection = (Reason, GatewayError);
