@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use axum::extract::FromRef;
 use sqlx::SqlitePool;
 use webauthn_rs::{Webauthn, WebauthnBuilder};
@@ -19,7 +18,8 @@ pub struct AppState {
     pub hasher: PasswordHasher,
     pub login: Arc<LoginLimits>,
     pub secrets: SecretBox,
-    pub webauthn: Arc<Webauthn>,
+    /// `None` when the public URL has no host name (passkeys need one).
+    pub webauthn: Option<Arc<Webauthn>>,
     pub ceremonies: Arc<Ceremonies>,
 }
 
@@ -33,17 +33,10 @@ pub struct LoginLimits {
 
 impl AppState {
     pub fn new(config: Config, db: SqlitePool) -> anyhow::Result<Self> {
-        let rp_id = config
-            .public_url
-            .host_str()
-            .context("AIPROXY_PUBLIC_URL has no host")?
-            .to_owned();
-        let webauthn = WebauthnBuilder::new(&rp_id, &config.public_url)
-            .and_then(|builder| builder.rp_name("aiproxy").build())
-            .context("cannot set up passkeys for AIPROXY_PUBLIC_URL")?;
+        let webauthn = passkeys(&config);
         Ok(Self {
             secrets: SecretBox::new(&config.master_key),
-            webauthn: Arc::new(webauthn),
+            webauthn: webauthn.map(Arc::new),
             ceremonies: Arc::default(),
             config: Arc::new(config),
             db,
@@ -53,6 +46,25 @@ impl AppState {
                 failures: SlidingWindow::new(Duration::from_secs(15 * 60), 10),
             }),
         })
+    }
+}
+
+fn passkeys(config: &Config) -> Option<Webauthn> {
+    let url = &config.public_url;
+    let webauthn = url
+        .domain()
+        .ok_or_else(|| anyhow::anyhow!("the host is not a domain name"))
+        .and_then(|rp_id| {
+            WebauthnBuilder::new(rp_id, url)
+                .and_then(|builder| builder.rp_name("aiproxy").build())
+                .map_err(anyhow::Error::from)
+        });
+    match webauthn {
+        Ok(webauthn) => Some(webauthn),
+        Err(err) => {
+            tracing::warn!(public_url = %url, error = %err, "passkeys are off: they need a host name in AIPROXY_PUBLIC_URL");
+            None
+        }
     }
 }
 

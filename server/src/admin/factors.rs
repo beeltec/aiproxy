@@ -99,7 +99,7 @@ async fn verify_totp(
 ) -> ApiResult<(CookieJar, Json<Me>)> {
     let key = limit_key(pending.admin_id);
     reserve_attempt(&state, &key)?;
-    if !check_totp(&state, pending.admin_id, &pending.username, &req.code, true).await? {
+    if !check_totp(&state, pending.admin_id, &pending.username, &req.code, TotpUse::Login).await? {
         return Err(wrong_code());
     }
     state.login.failures.release(&key);
@@ -203,30 +203,45 @@ fn totp(secret: Vec<u8>, username: &str) -> anyhow::Result<Totp> {
         .map_err(|err| anyhow::anyhow!("invalid TOTP configuration: {err}"))
 }
 
-/// Checks a code against the stored secret. A time step is accepted only once.
-async fn check_totp(state: &AppState, admin_id: i64, username: &str, code: &str, confirmed: bool) -> ApiResult<bool> {
-    let secret: Option<Vec<u8>> =
+/// What a correct TOTP code does.
+#[derive(Clone, Copy)]
+enum TotpUse {
+    /// Second login step with the active secret.
+    Login,
+    /// Confirms the new secret and turns TOTP on.
+    Confirm,
+}
+
+/// Checks a code. A time step is accepted only once. The update is bound to the exact secret
+/// that was checked, so a secret that another request stored in the meantime is not affected.
+async fn check_totp(state: &AppState, admin_id: i64, username: &str, code: &str, usage: TotpUse) -> ApiResult<bool> {
+    let confirmed = matches!(usage, TotpUse::Login);
+    let stored: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT secret_enc FROM admin_totp WHERE admin_id = ? AND confirmed = ?")
             .bind(admin_id)
             .bind(confirmed)
             .fetch_optional(&state.db)
             .await?;
-    let Some(secret) = secret else {
+    let Some(stored) = stored else {
         return Ok(false);
     };
-    let secret = state.secrets.decrypt(&totp_aad(admin_id), &secret).map_err(internal)?;
+    let secret = state.secrets.decrypt(&totp_aad(admin_id), &stored).map_err(internal)?;
     let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
     let Some(step) = totp(secret, username).map_err(internal)?.check_current(&code) else {
         return Ok(false);
     };
     let step = i64::try_from(step).map_err(|_| ApiError::internal())?;
-    let accepted = sqlx::query("UPDATE admin_totp SET last_used_step = ? WHERE admin_id = ? AND last_used_step < ?")
-        .bind(step)
-        .bind(admin_id)
-        .bind(step)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
+    let accepted = sqlx::query(
+        "UPDATE admin_totp SET last_used_step = ?1, confirmed = 1
+         WHERE admin_id = ?2 AND secret_enc = ?3 AND confirmed = ?4 AND last_used_step < ?1",
+    )
+    .bind(step)
+    .bind(admin_id)
+    .bind(&stored)
+    .bind(confirmed)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
     Ok(accepted == 1)
 }
 
@@ -316,20 +331,15 @@ async fn confirm_totp(
     State(state): State<AppState>,
     Json(req): Json<CodeRequest>,
 ) -> ApiResult<Json<FactorAdded>> {
-    let had_factor = methods(&state.db, current.admin_id).await?.any();
-    if !check_totp(&state, current.admin_id, &current.username, &req.code, false).await? {
+    if !check_totp(&state, current.admin_id, &current.username, &req.code, TotpUse::Confirm).await? {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "wrong_code",
             "The code is not correct. Check the time on your device.",
         ));
     }
-    sqlx::query("UPDATE admin_totp SET confirmed = 1 WHERE admin_id = ?")
-        .bind(current.admin_id)
-        .execute(&state.db)
-        .await?;
     Ok(Json(FactorAdded {
-        recovery_codes: first_factor_codes(&state.db, current.admin_id, had_factor).await?,
+        recovery_codes: first_recovery_codes(&state.db, current.admin_id).await?,
     }))
 }
 
@@ -355,11 +365,10 @@ fn recovery_code_hash(code: &str) -> Vec<u8> {
     sha256(normalized.as_bytes())
 }
 
-/// Replaces all recovery codes of the admin with new ones and returns them.
-async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Vec<String>, sqlx::Error> {
+fn generate_recovery_codes() -> Vec<String> {
     // 32 characters, so each random byte maps without bias. No "l", "o", "0" or "1".
     const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-    let codes: Vec<String> = (0..RECOVERY_CODES)
+    (0..RECOVERY_CODES)
         .map(|_| {
             let chars: String = random_bytes(10)
                 .iter()
@@ -367,7 +376,12 @@ async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Vec<St
                 .collect();
             format!("{}-{}", &chars[..5], &chars[5..])
         })
-        .collect();
+        .collect()
+}
+
+/// Replaces all recovery codes of the admin with new ones and returns them.
+async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Vec<String>, sqlx::Error> {
+    let codes = generate_recovery_codes();
     let mut tx = db.begin().await?;
     sqlx::query("DELETE FROM admin_recovery_codes WHERE admin_id = ?")
         .bind(admin_id)
@@ -384,16 +398,28 @@ async fn replace_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Vec<St
     Ok(codes)
 }
 
-/// Creates recovery codes when the admin just added the first second factor.
-pub async fn first_factor_codes(
-    db: &SqlitePool,
-    admin_id: i64,
-    had_factor: bool,
-) -> Result<Option<Vec<String>>, sqlx::Error> {
-    if had_factor {
-        return Ok(None);
+/// Creates recovery codes after a second factor was added, if the admin has none yet.
+/// The first insert decides it: a parallel request waits for this write and then finds codes.
+pub async fn first_recovery_codes(db: &SqlitePool, admin_id: i64) -> Result<Option<Vec<String>>, sqlx::Error> {
+    let codes = generate_recovery_codes();
+    let mut tx = db.begin().await?;
+    for (index, code) in codes.iter().enumerate() {
+        let inserted = sqlx::query(
+            "INSERT INTO admin_recovery_codes (admin_id, code_hash)
+             SELECT ?1, ?2 WHERE ?3 OR NOT EXISTS (SELECT 1 FROM admin_recovery_codes WHERE admin_id = ?1)",
+        )
+        .bind(admin_id)
+        .bind(recovery_code_hash(code))
+        .bind(index > 0)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if inserted == 0 {
+            return Ok(None);
+        }
     }
-    replace_recovery_codes(db, admin_id).await.map(Some)
+    tx.commit().await?;
+    Ok(Some(codes))
 }
 
 /// Recovery codes are useless without a second factor, so they go with the last one.

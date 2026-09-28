@@ -31,7 +31,7 @@ use crate::state::AppState;
 
 const CEREMONY_COOKIE: &str = "__Host-aiproxy_passkey";
 const CEREMONY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const MAX_CEREMONIES: usize = 1000;
+const MAX_CEREMONIES: usize = 10_000;
 const MAX_NAME: usize = 64;
 
 pub fn router() -> OpenApiRouter<AppState> {
@@ -86,10 +86,23 @@ enum Ceremony {
     },
 }
 
+impl Ceremony {
+    fn session_id(&self) -> Option<i64> {
+        match self {
+            Self::Register { session_id, .. } | Self::SecondFactor { session_id, .. } => Some(*session_id),
+            Self::Login { .. } => None,
+        }
+    }
+}
+
 impl Ceremonies {
+    /// Stores the state. A session has at most one open ceremony: a new one replaces the old one.
     fn insert(&self, ceremony: Ceremony) -> Result<String, ApiError> {
         let mut entries = self.entries.lock().expect("ceremony lock");
-        entries.retain(|_, (started, _)| started.elapsed() < CEREMONY_TIMEOUT);
+        let session = ceremony.session_id();
+        entries.retain(|_, (started, old)| {
+            started.elapsed() < CEREMONY_TIMEOUT && (session.is_none() || old.session_id() != session)
+        });
         if entries.len() >= MAX_CEREMONIES {
             return Err(ApiError::too_many_requests(
                 "Too many passkey requests. Try again in a moment.",
@@ -108,6 +121,14 @@ impl Ceremonies {
             .filter(|(started, _)| started.elapsed() < CEREMONY_TIMEOUT)
             .map(|(_, ceremony)| ceremony)
     }
+}
+
+/// Passkeys need a host name (not an IP address) in the public URL.
+fn webauthn(state: &AppState) -> ApiResult<&webauthn_rs::Webauthn> {
+    state
+        .webauthn
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Passkeys need a host name in AIPROXY_PUBLIC_URL, not an IP address."))
 }
 
 fn ceremony_expired() -> ApiError {
@@ -149,10 +170,9 @@ async fn registration_options(current: AdminSession, State(state): State<AppStat
     let existing = stored_passkeys(&state.db, current.admin_id)
         .await?
         .into_iter()
-        .map(|(_, passkey)| passkey.cred_id().clone())
+        .map(|stored| stored.passkey.cred_id().clone())
         .collect();
-    let (mut challenge, registration): (CreationChallengeResponse, PasskeyRegistration) = state
-        .webauthn
+    let (mut challenge, registration): (CreationChallengeResponse, PasskeyRegistration) = webauthn(&state)?
         .start_passkey_registration(user_id, &current.username, &current.username, Some(existing))
         .map_err(|err| {
             tracing::error!(error = %err, "cannot start passkey registration");
@@ -206,12 +226,10 @@ async fn register(
     }
     let credential: RegisterPublicKeyCredential = serde_json::from_value(req.credential)
         .map_err(|_| ApiError::bad_request("The passkey answer is not valid."))?;
-    let passkey = state
-        .webauthn
+    let passkey = webauthn(&state)?
         .finish_passkey_registration(&credential, &registration)
         .map_err(passkey_failed)?;
 
-    let had_factor = factors::methods(&state.db, current.admin_id).await?.any();
     sqlx::query(
         "INSERT INTO admin_passkeys (admin_id, name, credential_id, credential, created_at) VALUES (?, ?, ?, ?, ?)",
     )
@@ -227,7 +245,7 @@ async fn register(
         other => other.into(),
     })?;
     Ok(Json(FactorAdded {
-        recovery_codes: factors::first_factor_codes(&state.db, current.admin_id, had_factor).await?,
+        recovery_codes: factors::first_recovery_codes(&state.db, current.admin_id).await?,
     }))
 }
 
@@ -268,35 +286,51 @@ async fn webauthn_user_id(db: &SqlitePool, admin_id: i64) -> ApiResult<Uuid> {
     Uuid::parse_str(&id).map_err(|_| ApiError::internal())
 }
 
-async fn stored_passkeys(db: &SqlitePool, admin_id: i64) -> ApiResult<Vec<(i64, Passkey)>> {
+/// A stored passkey: row id, the stored JSON, and the parsed credential.
+struct Stored {
+    id: i64,
+    json: String,
+    passkey: Passkey,
+}
+
+async fn stored_passkeys(db: &SqlitePool, admin_id: i64) -> ApiResult<Vec<Stored>> {
     let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, credential FROM admin_passkeys WHERE admin_id = ?")
         .bind(admin_id)
         .fetch_all(db)
         .await?;
     rows.into_iter()
         .map(|(id, json)| {
-            serde_json::from_str(&json).map(|passkey| (id, passkey)).map_err(|err| {
-                tracing::error!(error = %err, passkey = id, "stored passkey is not readable");
-                ApiError::internal()
-            })
+            serde_json::from_str(&json)
+                .map(|passkey| Stored { id, json, passkey })
+                .map_err(|err| {
+                    tracing::error!(error = %err, passkey = id, "stored passkey is not readable");
+                    ApiError::internal()
+                })
         })
         .collect()
 }
 
-/// Saves the new sign counter and the last use.
+/// Saves the new sign counter and the last use. The update is refused when another login
+/// changed the stored credential in the meantime, so a lower counter never overwrites a higher one.
 async fn record_use(
     db: &SqlitePool,
-    id: i64,
-    mut passkey: Passkey,
+    stored: Stored,
     result: &webauthn_rs::prelude::AuthenticationResult,
 ) -> ApiResult<()> {
+    let Stored { id, json, mut passkey } = stored;
     passkey.update_credential(result);
-    sqlx::query("UPDATE admin_passkeys SET credential = ?, last_used_at = ? WHERE id = ?")
-        .bind(serde_json::to_string(&passkey).map_err(|_| ApiError::internal())?)
-        .bind(now())
-        .bind(id)
-        .execute(db)
-        .await?;
+    let updated =
+        sqlx::query("UPDATE admin_passkeys SET credential = ?, last_used_at = ? WHERE id = ? AND credential = ?")
+            .bind(serde_json::to_string(&passkey).map_err(|_| ApiError::internal())?)
+            .bind(now())
+            .bind(id)
+            .bind(json)
+            .execute(db)
+            .await?
+            .rows_affected();
+    if updated == 0 {
+        return Err(passkey_failed("passkey changed during the login"));
+    }
     Ok(())
 }
 
@@ -311,13 +345,14 @@ async fn second_factor_options(pending: PendingSession, State(state): State<AppS
     let passkeys: Vec<Passkey> = stored_passkeys(&state.db, pending.admin_id)
         .await?
         .into_iter()
-        .map(|(_, passkey)| passkey)
+        .map(|stored| stored.passkey)
         .collect();
     if passkeys.is_empty() {
         return Err(ApiError::bad_request("No passkey is added for this admin."));
     }
-    let (challenge, authentication): (RequestChallengeResponse, PasskeyAuthentication) =
-        state.webauthn.start_passkey_authentication(&passkeys).map_err(|err| {
+    let (challenge, authentication): (RequestChallengeResponse, PasskeyAuthentication) = webauthn(&state)?
+        .start_passkey_authentication(&passkeys)
+        .map_err(|err| {
             tracing::error!(error = %err, "cannot start passkey authentication");
             ApiError::internal()
         })?;
@@ -365,16 +400,15 @@ async fn verify_second_factor(
     }
     let credential: PublicKeyCredential = serde_json::from_value(req.credential)
         .map_err(|_| ApiError::bad_request("The passkey answer is not valid."))?;
-    let result = state
-        .webauthn
+    let result = webauthn(&state)?
         .finish_passkey_authentication(&credential, &authentication)
         .map_err(passkey_failed)?;
-    let (id, passkey) = stored_passkeys(&state.db, pending.admin_id)
+    let stored = stored_passkeys(&state.db, pending.admin_id)
         .await?
         .into_iter()
-        .find(|(_, passkey)| passkey.cred_id() == result.cred_id())
+        .find(|stored| stored.passkey.cred_id() == result.cred_id())
         .ok_or_else(|| passkey_failed("passkey was removed"))?;
-    record_use(&state.db, id, passkey, &result).await?;
+    record_use(&state.db, stored, &result).await?;
     state.login.failures.release(&key);
     factors::complete_login(&state, pending, &ip.to_string(), &headers, jar).await
 }
@@ -394,7 +428,7 @@ async fn passkey_login_options(
     if !state.login.attempts.try_record(&ip.to_string()) {
         return Err(ApiError::too_many_requests("Too many attempts. Wait a minute."));
     }
-    let (mut challenge, authentication) = state.webauthn.start_discoverable_authentication().map_err(|err| {
+    let (mut challenge, authentication) = webauthn(&state)?.start_discoverable_authentication().map_err(|err| {
         tracing::error!(error = %err, "cannot start passkey login");
         ApiError::internal()
     })?;
@@ -439,8 +473,7 @@ async fn passkey_login(
     }
     let credential: PublicKeyCredential = serde_json::from_value(req.credential)
         .map_err(|_| ApiError::bad_request("The passkey answer is not valid."))?;
-    let (user_id, credential_id) = state
-        .webauthn
+    let (user_id, credential_id) = webauthn(&state)?
         .identify_discoverable_authentication(&credential)
         .map_err(passkey_failed)?;
     let admin: Option<(i64, String)> =
@@ -449,16 +482,16 @@ async fn passkey_login(
             .fetch_optional(&state.db)
             .await?;
     let (admin_id, username) = admin.ok_or_else(|| passkey_failed("unknown user handle"))?;
-    let (id, passkey) = stored_passkeys(&state.db, admin_id)
+    let stored = stored_passkeys(&state.db, admin_id)
         .await?
         .into_iter()
-        .find(|(_, passkey)| passkey.cred_id().as_ref() == credential_id)
+        .find(|stored| stored.passkey.cred_id().as_ref() == credential_id)
         .ok_or_else(|| passkey_failed("unknown credential"))?;
-    let result = state
-        .webauthn
-        .finish_discoverable_authentication(&credential, authentication, &[DiscoverableKey::from(&passkey)])
+    let result = webauthn(&state)?
+        .finish_discoverable_authentication(&credential, authentication, &[DiscoverableKey::from(&stored.passkey)])
         .map_err(passkey_failed)?;
-    record_use(&state.db, id, passkey, &result).await?;
+    let id = stored.id;
+    record_use(&state.db, stored, &result).await?;
 
     let client = ClientInfo {
         ip: &ip.to_string(),
