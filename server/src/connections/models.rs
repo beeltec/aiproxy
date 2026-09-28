@@ -196,6 +196,22 @@ fn catalog_capabilities(catalog: &Catalog, kind: Kind, id: &str, out: &mut Map<S
         }
         out.entry("max_output")
             .or_insert_with(|| entry["max_output_tokens"].clone());
+        // Input kinds, when models.dev did not give them.
+        let flags = [
+            ("supports_vision", "image"),
+            ("supports_pdf_input", "file"),
+            ("supports_audio_input", "audio"),
+        ];
+        if !out.contains_key("input") && flags.iter().any(|(flag, _)| entry[*flag].is_boolean()) {
+            let mut input = vec!["text"];
+            input.extend(
+                flags
+                    .iter()
+                    .filter(|(flag, _)| entry[*flag] == true)
+                    .map(|(_, kind)| *kind),
+            );
+            out.insert("input".into(), json!(input));
+        }
         // Fast mode: Anthropic `supports_speed`, or an OpenAI priority price.
         let fast = entry["supports_speed"] == true || !entry["input_cost_per_token_priority"].is_null();
         if fast {

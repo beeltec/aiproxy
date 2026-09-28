@@ -240,6 +240,12 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
         body["output_config"]["effort"] = json!(anthropic_effort(&effort, capabilities));
     }
     drop_thinking_for_forced_tools(body, capabilities).map_err(bad)?;
+    // A model without fast mode rejects `speed`; it answers at normal speed instead.
+    if capabilities["fast"] == false
+        && let Some(map) = body.as_object_mut()
+    {
+        map.remove("speed");
+    }
     let mut betas = Vec::new();
     if body["speed"] == "fast" {
         betas.push(FAST_BETA.to_owned());
@@ -991,6 +997,8 @@ impl Decoder for MessagesDecoder {
             "message_start" => {
                 self.usage = data["message"]["usage"].clone();
                 if let Some(tier) = self.usage["service_tier"].as_str() {
+                    // Anthropic says `standard` where OpenAI says `default`.
+                    let tier = if tier == "standard" { "default" } else { tier };
                     self.service_tier = Some(tier.to_owned());
                 }
                 if !self.started {

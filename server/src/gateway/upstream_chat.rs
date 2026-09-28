@@ -40,7 +40,8 @@ pub fn tokens(usage: &Value) -> Tokens {
 // Request
 
 /// One Responses content part as a Chat content part.
-fn chat_part(part: &Value) -> Result<Option<Value>, String> {
+/// OpenRouter also takes a document URL in `file_data`; OpenAI takes only inline data.
+fn chat_part(part: &Value, kind: Kind) -> Result<Option<Value>, String> {
     Ok(match part["type"].as_str().unwrap_or_default() {
         "input_text" | "output_text" | "text" => Some(json!({ "type": "text", "text": part["text"] })),
         "input_image" => {
@@ -51,8 +52,9 @@ fn chat_part(part: &Value) -> Result<Option<Value>, String> {
             Some(json!({ "type": "image_url", "image_url": image }))
         }
         "input_file" => {
-            let Some(data) = part["file_data"].as_str() else {
-                return Err("Chat upstreams take files only as `file_data`.".into());
+            let url = part["file_url"].as_str().filter(|_| kind == Kind::OpenRouter);
+            let Some(data) = part["file_data"].as_str().or(url) else {
+                return Err("This model takes files only as inline `file_data`.".into());
             };
             Some(json!({ "type": "file", "file": { "file_data": data, "filename": part["filename"] } }))
         }
@@ -125,7 +127,7 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                             Value::Array(parts) => {
                                 let mut out = Vec::new();
                                 for part in parts {
-                                    out.extend(chat_part(part)?);
+                                    out.extend(chat_part(part, kind)?);
                                 }
                                 Value::Array(out)
                             }
@@ -165,7 +167,7 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                 let mut images: Vec<Value> = Vec::new();
                 for part in output.as_array().into_iter().flatten() {
                     if matches!(part["type"].as_str(), Some("input_image" | "input_file")) {
-                        images.extend(chat_part(part)?);
+                        images.extend(chat_part(part, kind)?);
                     }
                 }
                 if !images.is_empty() {
