@@ -152,6 +152,16 @@ pub async fn resolve(db: &SqlitePool, requested: &str) -> Result<Route, RouteErr
             Err(not_found())
         };
     }
+    if let Some((prefix, _)) = requested.split_once('/') {
+        let known: bool = prefix == "chatgpt"
+            || sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM connections WHERE slug = ?)")
+                .bind(prefix)
+                .fetch_one(db)
+                .await?;
+        if known {
+            return Err(not_found());
+        }
+    }
 
     let rows: Vec<ModelRow> = sqlx::query_as(select_models!("m.upstream_id = ? AND m.enabled = 1"))
         .bind(requested)

@@ -50,10 +50,19 @@ pub fn response(
     response
 }
 
-/// One SSE frame.
+/// One SSE frame. Data with several lines gets one `data:` line each.
 pub fn frame(event: Option<&str>, data: &str) -> Bytes {
-    match event {
-        Some(event) => Bytes::from(format!("event: {event}\ndata: {data}\n\n")),
-        None => Bytes::from(format!("data: {data}\n\n")),
+    let mut out = String::with_capacity(data.len() + 32);
+    if let Some(event) = event {
+        out.push_str("event: ");
+        out.push_str(event);
+        out.push('\n');
     }
+    for line in data.split('\n') {
+        out.push_str("data: ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    Bytes::from(out)
 }

@@ -20,6 +20,7 @@ use crate::state::AppState;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PAGES: usize = 20;
+const MAX_LIST_BYTES: usize = 32 * 1024 * 1024;
 
 struct Listed {
     id: String,
@@ -127,11 +128,26 @@ async fn get(state: &AppState, connection: &Connection, path: &str) -> anyhow::R
         .send()
         .await?;
     let status = response.status();
+    // A custom base URL can answer anything; the answer is read with a size limit.
+    let body = read_limited(response, MAX_LIST_BYTES).await?;
     if !status.is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(300).collect();
-        bail!("the model list request failed with {status}: {body}");
+        let text: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+        bail!("the model list request failed with {status}: {text}");
     }
-    Ok(response.json().await?)
+    Ok(serde_json::from_slice(&body)?)
+}
+
+async fn read_limited(response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
+    use futures_util::StreamExt;
+    let mut chunks = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        body.extend_from_slice(&chunk?);
+        if body.len() > limit {
+            bail!("the model list is larger than {} MB", limit / (1024 * 1024));
+        }
+    }
+    Ok(body)
 }
 
 fn entries(list: &Value) -> impl Iterator<Item = &Value> {
@@ -247,7 +263,11 @@ fn openrouter_capabilities(model: &Value) -> Value {
     }
     let parameters = model["supported_parameters"].as_array();
     if parameters.is_some_and(|p| p.iter().any(|v| v == "reasoning")) {
-        out.insert("efforts".into(), json!(["minimal", "low", "medium", "high", "xhigh"]));
+        // `none` turns reasoning off.
+        out.insert(
+            "efforts".into(),
+            json!(["none", "minimal", "low", "medium", "high", "xhigh"]),
+        );
     }
     if let Some(context) = model["context_length"].as_i64() {
         out.insert("context_window".into(), json!(context));

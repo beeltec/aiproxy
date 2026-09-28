@@ -181,7 +181,7 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
     record_usage(&state, &job, &outcome, started).await;
 }
 
-const CLIENT_CLOSED: &str = "client_closed";
+pub(super) const CLIENT_CLOSED: &str = "client_closed";
 
 pub(super) fn client_closed() -> Failure {
     Failure::new(

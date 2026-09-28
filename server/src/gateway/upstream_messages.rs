@@ -164,6 +164,17 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             direct_search(tool)?;
         }
     }
+    // Thinking that the gateway made from OpenAI reasoning has no Anthropic signature.
+    for message in body["messages"].as_array_mut().into_iter().flatten() {
+        if let Some(content) = message["content"].as_array_mut() {
+            content.retain(|block| {
+                !(block["type"] == "thinking"
+                    && block["signature"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with(super::messages_api::SIGNATURE_PREFIX)))
+            });
+        }
+    }
     if let Some(alias) = alias {
         if let Some(effort) = &alias.effort
             && body["output_config"]["effort"].is_null()
@@ -236,6 +247,17 @@ fn blocks(content: &Value) -> Result<Vec<Value>, String> {
     }
 }
 
+/// A thinking or redacted thinking block with only its own fields, else nothing.
+fn thinking_block_only(block: &Value) -> Option<Value> {
+    match block["type"].as_str()? {
+        "thinking" => Some(
+            json!({ "type": "thinking", "thinking": block["thinking"].as_str()?, "signature": block["signature"].as_str()? }),
+        ),
+        "redacted_thinking" => Some(json!({ "type": "redacted_thinking", "data": block["data"].as_str()? })),
+        _ => None,
+    }
+}
+
 /// Adds blocks to the conversation. Anthropic needs alternating roles, so blocks of the same
 /// role join the last message.
 fn push(messages: &mut Vec<Value>, role: &str, mut content: Vec<Value>) {
@@ -283,14 +305,19 @@ pub fn encode(
                 _ => push(&mut messages, "user", blocks(&item["content"])?),
             },
             "reasoning" => {
-                // Only thinking that came from Anthropic can go back.
+                // Only thinking that came from Anthropic can go back. The client can change the
+                // envelope, so only thinking blocks with their known fields pass.
                 let thinking = item["encrypted_content"]
                     .as_str()
                     .and_then(|e| e.strip_prefix(THINKING_PREFIX))
                     .and_then(|e| b64().decode(e).ok())
                     .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok());
                 if let Some(thinking) = thinking {
-                    push(&mut messages, "assistant", thinking);
+                    push(
+                        &mut messages,
+                        "assistant",
+                        thinking.iter().filter_map(thinking_block_only).collect(),
+                    );
                 }
             }
             "function_call" => {
@@ -320,7 +347,9 @@ pub fn encode(
         }
     }
 
-    for message in messages.iter_mut().filter(|m| m["role"] == "assistant") {
+    // Anthropic needs the thinking blocks only in the last assistant turn, so only that turn
+    // gets its kept content back (this also bounds the request size).
+    if let Some(message) = messages.iter_mut().rev().find(|m| m["role"] == "assistant") {
         let kept = message["content"]
             .as_array()
             .into_iter()
@@ -430,8 +459,14 @@ pub fn encode(
         body_out["stop_sequences"] = json!(stops);
     }
     let format = &body["text"]["format"];
-    if format["type"] == "json_schema" {
-        body_out["output_config"]["format"] = json!({ "type": "json_schema", "schema": format["schema"] });
+    match format["type"].as_str() {
+        Some("json_schema") => {
+            body_out["output_config"]["format"] = json!({ "type": "json_schema", "schema": format["schema"] });
+        }
+        Some("json_object") => {
+            return Err("Anthropic models have no JSON object mode. Use a JSON schema.".into());
+        }
+        _ => {}
     }
     let mut betas = Vec::new();
     if matches!(body["service_tier"].as_str(), Some("priority" | "fast")) && capabilities["fast"] == true {

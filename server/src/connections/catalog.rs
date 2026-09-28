@@ -14,6 +14,7 @@ const MODELS_DEV: &str = "https://models.dev/api.json";
 const LITELLM: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const TIMEOUT: Duration = Duration::from_secs(60);
+const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Entries per provider (`openai`, `anthropic`) and model id.
 #[derive(Default)]
@@ -33,27 +34,24 @@ impl Catalog {
 }
 
 #[derive(Default)]
+/// The catalog and the time of its next load.
 pub struct CatalogCache(Mutex<Option<(Instant, Arc<Catalog>)>>);
 
 /// The current catalog. When a download fails, the last good catalog (or an empty one) is used.
 pub async fn get(state: &AppState) -> Arc<Catalog> {
     let cached = state.catalog.0.lock().expect("catalog lock").clone();
-    if let Some((loaded, catalog)) = &cached
-        && loaded.elapsed() < MAX_AGE
+    if let Some((next_load, catalog)) = &cached
+        && Instant::now() < *next_load
     {
         return catalog.clone();
     }
-    match load(&state.http).await {
-        Ok(catalog) => {
-            let catalog = Arc::new(catalog);
-            *state.catalog.0.lock().expect("catalog lock") = Some((Instant::now(), catalog.clone()));
-            catalog
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "cannot load the model catalogs");
-            cached.map(|(_, catalog)| catalog).unwrap_or_default()
-        }
-    }
+    let old = cached.map(|(_, catalog)| catalog);
+    let (catalog, complete) = load(&state.http, old.as_deref()).await;
+    let catalog = Arc::new(catalog);
+    // A failed source is tried again soon; the other source is used meanwhile.
+    let next_load = Instant::now() + if complete { MAX_AGE } else { RETRY_AFTER };
+    *state.catalog.0.lock().expect("catalog lock") = Some((next_load, catalog.clone()));
+    catalog
 }
 
 async fn fetch(http: &reqwest::Client, url: &str) -> anyhow::Result<Value> {
@@ -61,21 +59,40 @@ async fn fetch(http: &reqwest::Client, url: &str) -> anyhow::Result<Value> {
     Ok(response.json().await?)
 }
 
-async fn load(http: &reqwest::Client) -> anyhow::Result<Catalog> {
-    let (models_dev, litellm) = tokio::try_join!(fetch(http, MODELS_DEV), fetch(http, LITELLM))?;
+/// Loads both sources. A source that fails keeps its entries from `old`. Returns the catalog
+/// and whether both sources loaded.
+async fn load(http: &reqwest::Client, old: Option<&Catalog>) -> (Catalog, bool) {
+    let (models_dev, litellm) = tokio::join!(fetch(http, MODELS_DEV), fetch(http, LITELLM));
     let mut catalog = Catalog::default();
-    for provider in ["openai", "anthropic"] {
-        let models = models_dev[provider]["models"].as_object().into_iter().flatten();
-        for (id, entry) in models {
-            catalog
-                .models_dev
-                .insert((provider.to_owned(), id.clone()), entry.clone());
+    let complete = models_dev.is_ok() && litellm.is_ok();
+    match models_dev {
+        Ok(models_dev) => {
+            for provider in ["openai", "anthropic"] {
+                let models = models_dev[provider]["models"].as_object().into_iter().flatten();
+                for (id, entry) in models {
+                    catalog
+                        .models_dev
+                        .insert((provider.to_owned(), id.clone()), entry.clone());
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot load the models.dev catalog");
+            catalog.models_dev = old.map(|c| c.models_dev.clone()).unwrap_or_default();
         }
     }
-    for (id, entry) in litellm.as_object().into_iter().flatten() {
-        if let Some(provider @ ("openai" | "anthropic")) = entry["litellm_provider"].as_str() {
-            catalog.litellm.insert((provider.to_owned(), id.clone()), entry.clone());
+    match litellm {
+        Ok(litellm) => {
+            for (id, entry) in litellm.as_object().into_iter().flatten() {
+                if let Some(provider @ ("openai" | "anthropic")) = entry["litellm_provider"].as_str() {
+                    catalog.litellm.insert((provider.to_owned(), id.clone()), entry.clone());
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot load the LiteLLM catalog");
+            catalog.litellm = old.map(|c| c.litellm.clone()).unwrap_or_default();
         }
     }
-    Ok(catalog)
+    (catalog, complete)
 }

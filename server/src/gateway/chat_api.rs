@@ -201,6 +201,11 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     {
         out.insert("max_output_tokens".into(), json!(max));
     }
+    for field in ["temperature", "top_p"] {
+        if body[field].is_number() {
+            out.insert(field.into(), body[field].clone());
+        }
+    }
     // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
     match &body["stop"] {
         Value::String(stop) => {

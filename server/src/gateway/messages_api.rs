@@ -23,7 +23,7 @@ use crate::usage::{Row, Tokens};
 
 /// OpenAI reasoning travels in the `signature` of an Anthropic thinking block with this prefix.
 /// Signatures without it come from Anthropic and are dropped.
-const SIGNATURE_PREFIX: &str = "aip1:";
+pub(super) const SIGNATURE_PREFIX: &str = "aip1:";
 
 pub async fn create(
     State(state): State<AppState>,
@@ -234,6 +234,11 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     }
     if let Some(max) = body["max_tokens"].as_i64() {
         out.insert("max_output_tokens".into(), json!(max));
+    }
+    for field in ["temperature", "top_p"] {
+        if body[field].is_number() {
+            out.insert(field.into(), body[field].clone());
+        }
     }
     // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
     if let Some(stops) = body["stop_sequences"].as_array() {

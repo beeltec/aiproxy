@@ -164,7 +164,18 @@ pub(super) async fn attempt(
         return Ok(());
     }
     if native {
-        return native_stream(response, wire, job, ttl.as_deref(), tx, outcome, started).await;
+        return match native_stream(response, wire, job, ttl.as_deref(), tx, outcome, started).await {
+            // The client already has native frames, so the error goes out in the upstream format.
+            Err(failure) if failure.code != super::engine::CLIENT_CLOSED => {
+                outcome.status = failure.status.as_u16();
+                outcome.error_kind = Some(failure.code.to_owned());
+                for frame in native_error(wire, &failure) {
+                    let _ = tx.send(Msg::Raw(frame)).await;
+                }
+                Ok(())
+            }
+            other => other,
+        };
     }
 
     let mut decoder: Box<dyn Decoder> = match wire {
@@ -357,6 +368,29 @@ async fn send(
         return Err(error_answer(response).await);
     }
     Ok(response)
+}
+
+/// A stream error event in the format of the upstream.
+fn native_error(wire: Wire, failure: &Failure) -> Vec<bytes::Bytes> {
+    match wire {
+        Wire::Responses => {
+            let data = json!({ "type": "error", "code": failure.code, "message": failure.message });
+            vec![sse::frame(Some("error"), &data.to_string())]
+        }
+        Wire::Chat => {
+            let data = json!({ "error": { "message": failure.message, "type": "server_error", "code": failure.code } });
+            vec![sse::frame(None, &data.to_string()), sse::frame(None, "[DONE]")]
+        }
+        Wire::Messages => {
+            let kind = match failure.status.as_u16() {
+                429 => "rate_limit_error",
+                503 | 529 => "overloaded_error",
+                _ => "api_error",
+            };
+            let data = json!({ "type": "error", "error": { "type": kind, "message": failure.message } });
+            vec![sse::frame(Some("error"), &data.to_string())]
+        }
+    }
 }
 
 /// Forwards a native stream and reads its usage.

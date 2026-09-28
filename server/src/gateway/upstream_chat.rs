@@ -89,7 +89,13 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
     };
     // OpenRouter reasoning waits for the assistant message that follows it.
     let mut reasoning_details: Vec<Value> = Vec::new();
+    // Images of tool results wait until all tool messages of the group are written: Chat
+    // needs a tool message for every call before the next user message.
+    let mut tool_images: Vec<Value> = Vec::new();
     for item in &items {
+        if item["type"] != "function_call_output" && !tool_images.is_empty() {
+            messages.push(json!({ "role": "user", "content": std::mem::take(&mut tool_images) }));
+        }
         match item["type"].as_str().unwrap_or("message") {
             "message" => {
                 let role = item["role"].as_str().unwrap_or("user");
@@ -159,12 +165,11 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                     .filter_map(|p| chat_part(p).ok().flatten())
                     .collect();
                 if !images.is_empty() {
-                    let mut content = vec![json!({ "type": "text", "text": format!(
+                    tool_images.push(json!({ "type": "text", "text": format!(
                         "Images from the result of tool call {}:",
                         item["call_id"].as_str().unwrap_or_default()
-                    ) })];
-                    content.extend(images);
-                    messages.push(json!({ "role": "user", "content": content }));
+                    ) }));
+                    tool_images.extend(images);
                 }
             }
             "reasoning" => {
@@ -182,6 +187,10 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
             "web_search_call" => {}
             other => return Err(format!("The input item `{other}` is not supported for this model.")),
         }
+    }
+
+    if !tool_images.is_empty() {
+        messages.push(json!({ "role": "user", "content": tool_images }));
     }
 
     let mut out = Map::new();
