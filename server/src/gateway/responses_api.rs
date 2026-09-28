@@ -28,7 +28,7 @@ pub async fn create(
         .get("session_id")
         .or_else(|| headers.get("session-id"))
         .and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission).await {
+    let prepared = match request::prepare(&state, &key, body, "responses", "responses", hint, admission.clone()).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -38,7 +38,7 @@ pub async fn create(
         Err(failure) => return error(failure),
     };
     if stream {
-        return sse::response(rx, encode_event, ": ping\n\n");
+        return sse::response(rx, encode_event, ": ping\n\n", admission);
     }
     collect(rx).await
 }

@@ -32,7 +32,7 @@ pub async fn create(
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
+    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission.clone()).await {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -44,7 +44,7 @@ pub async fn create(
     };
     if stream {
         let mut encoder = ChunkEncoder::new(requested, include_usage);
-        return sse::response(rx, move |msg| encoder.encode(msg), ": ping\n\n");
+        return sse::response(rx, move |msg| encoder.encode(msg), ": ping\n\n", admission);
     }
     collect(rx, &requested).await
 }
@@ -65,6 +65,9 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
                 input.push(json!({ "type": "message", "role": "user", "content": user_parts(&message["content"])? }))
             }
             "assistant" => {
+                if !message["audio"].is_null() {
+                    return Err("Assistant audio from an earlier answer is not supported.".into());
+                }
                 let text = text_of(&message["content"]);
                 let tool_calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
                 if let Some(refusal) = message["refusal"].as_str().filter(|r| !r.is_empty()) {

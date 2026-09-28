@@ -8,17 +8,21 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
+use super::auth::Admission;
 use super::engine::Msg;
 
 /// A ping after this much silence. Claude Code stops after 300 s without data.
 const PING_AFTER: Duration = Duration::from_secs(15);
+/// A client that takes no data for this long has stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Turns engine messages into client SSE bytes. `encode` returns the bytes for one message;
-/// `ping` is sent after silence.
+/// `ping` is sent after silence. A stalled client loses its concurrency slots.
 pub fn response(
     mut rx: mpsc::Receiver<Msg>,
     mut encode: impl FnMut(Msg) -> Vec<Bytes> + Send + 'static,
     ping: &'static str,
+    admission: Admission,
 ) -> Response {
     let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
     tokio::spawn(async move {
@@ -34,8 +38,13 @@ pub fn response(
                 Err(_) => vec![Bytes::from_static(ping.as_bytes())],
             };
             for chunk in chunks {
-                if tx.send(Ok(chunk)).await.is_err() {
-                    return;
+                match tokio::time::timeout(WRITE_TIMEOUT, tx.send(Ok(chunk))).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => return,
+                    Err(_) => {
+                        admission.release();
+                        return;
+                    }
                 }
             }
         }

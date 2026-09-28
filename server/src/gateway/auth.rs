@@ -153,10 +153,17 @@ pub fn error_format(path: &str, headers: &HeaderMap) -> ErrorFormat {
 }
 
 /// The concurrency slots of an admitted request. The response body and the background work of
-/// the request hold copies; the slots become free when all copies are dropped.
+/// the request hold copies; the slots become free when all copies are dropped, or on `release`.
 #[derive(Clone)]
 pub struct Admission {
-    _slots: Arc<(ActiveGuard, OwnedSemaphorePermit)>,
+    slots: Arc<Mutex<Option<(ActiveGuard, OwnedSemaphorePermit)>>>,
+}
+
+impl Admission {
+    /// Frees the slots now, for a response that the client stopped reading.
+    pub fn release(&self) {
+        self.slots.lock().expect("admission lock").take();
+    }
 }
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
@@ -197,7 +204,7 @@ pub async fn authenticate(State(state): State<AppState>, request: Request, next:
     let mut request = Request::from_parts(parts, Body::from(bytes));
     tracing::debug!(api_key = key.id, "request admitted");
     let admission = Admission {
-        _slots: Arc::new(permits),
+        slots: Arc::new(Mutex::new(Some(permits))),
     };
     request.extensions_mut().insert(key);
     request.extensions_mut().insert(admission.clone());
