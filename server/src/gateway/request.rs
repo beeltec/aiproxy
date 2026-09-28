@@ -238,9 +238,10 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Refuses inputs that the model cannot read (when its input kinds are known).
+/// Refuses inputs that the model cannot read (when its input kinds are known). An empty list is
+/// unknown too: the backend then decides.
 fn check_inputs(body: &Value, capabilities: &Value, model: &str) -> Result<(), Failure> {
-    let Some(known) = capabilities["input"].as_array() else {
+    let Some(known) = capabilities["input"].as_array().filter(|list| !list.is_empty()) else {
         return Ok(());
     };
     let supports = |kind: &str| known.iter().any(|k| k == kind);
