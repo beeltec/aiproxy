@@ -1,16 +1,17 @@
 //! API key check and per-key limits for the gateway.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::error::{ErrorFormat, GatewayError};
@@ -28,6 +29,8 @@ const LAST_USED_INTERVAL_SECS: u64 = 60;
 #[derive(Clone, Debug)]
 pub struct ApiKey {
     pub id: i64,
+    /// Model patterns; empty means all models.
+    pub allowlist: Vec<String>,
 }
 
 /// Limits that live in memory: requests per minute and parallel requests, per key and in total.
@@ -38,6 +41,7 @@ pub struct KeyLimits {
 
 struct KeyState {
     rpm: Option<TokenBucket>,
+    tpm: Option<TokenBucket>,
     /// Requests of this key that are running now.
     active: Arc<AtomicUsize>,
     last_used_write: Option<Instant>,
@@ -49,6 +53,31 @@ struct ActiveGuard(Arc<AtomicUsize>);
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl KeyLimits {
+    /// Reserves tokens before a request and returns the amount taken, or the seconds to wait
+    /// when the key's tokens-per-minute budget is used up. A reservation is at most the whole
+    /// budget, so a large request can pass when the budget is full; its real usage then delays
+    /// the next requests.
+    pub fn reserve_tokens(&self, key: i64, amount: i64) -> Result<i64, u64> {
+        let mut keys = self.keys.lock().expect("key limits lock");
+        let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) else {
+            return Ok(0);
+        };
+        let amount = (amount as f64).min(bucket.capacity);
+        bucket.take(amount).map(|()| amount as i64)
+    }
+
+    /// Corrects a reservation with the real usage. The bucket may go below zero, which delays
+    /// the next requests.
+    pub fn settle_tokens(&self, key: i64, reserved: i64, used: i64) {
+        let mut keys = self.keys.lock().expect("key limits lock");
+        if let Some(bucket) = keys.get_mut(&key).and_then(|state| state.tpm.as_mut()) {
+            bucket.refill();
+            bucket.tokens = (bucket.tokens + (reserved - used) as f64).min(bucket.capacity);
+        }
     }
 }
 
@@ -110,7 +139,9 @@ struct Row {
     expires_at: Option<i64>,
     revoked_at: Option<i64>,
     rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
     concurrency_limit: Option<i64>,
+    allowlist: String,
 }
 
 /// The error format depends on the API the client speaks.
@@ -122,9 +153,79 @@ pub fn error_format(path: &str, headers: &HeaderMap) -> ErrorFormat {
     }
 }
 
-/// Middleware for `/v1`: checks the key and the limits. The permits for parallel requests stay
-/// with the response body, so a streamed answer counts until it ends.
-pub async fn authenticate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+/// The concurrency slots of an admitted request. The response body and the background work of
+/// the request hold copies; the slots become free when all copies are dropped, or on `release`.
+#[derive(Clone)]
+pub struct Admission {
+    slots: Arc<Mutex<Option<(ActiveGuard, OwnedSemaphorePermit)>>>,
+}
+
+impl Admission {
+    fn release(&self) {
+        self.slots.lock().expect("admission lock").take();
+    }
+}
+
+/// A client that takes no data for this long has stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A response body, its slots, and the time when it gave data that the server has not yet
+/// taken further. The watchdog has only a weak link, so a dropped body frees the slots at once.
+struct Watched {
+    body: Option<Body>,
+    admission: Admission,
+    handed_out: Option<Instant>,
+}
+
+/// Wraps the response body. When the server asks for no more data within the write timeout
+/// after a frame, the client has stopped reading: the body is dropped (which stops the work of
+/// the request) and the slots become free.
+fn watch(body: Body, admission: Admission) -> Body {
+    let watched = Arc::new(Mutex::new(Watched {
+        body: Some(body),
+        admission,
+        handed_out: None,
+    }));
+    let link = Arc::downgrade(&watched);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let Some(watched) = link.upgrade() else {
+                return;
+            };
+            let mut watched = watched.lock().expect("watch lock");
+            if watched.handed_out.is_some_and(|at| at.elapsed() > WRITE_TIMEOUT) {
+                watched.body = None;
+                watched.admission.release();
+                return;
+            }
+        }
+    });
+    Body::from_stream(futures_util::stream::poll_fn(move |cx| {
+        let mut watched = watched.lock().expect("watch lock");
+        let Some(body) = watched.body.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let next = loop {
+            match Pin::new(&mut *body).poll_frame(cx) {
+                // Trailers are not used by the gateway.
+                Poll::Ready(Some(Ok(frame))) if !frame.is_data() => {}
+                Poll::Ready(Some(frame)) => break Poll::Ready(Some(frame.map(|f| f.into_data().unwrap_or_default()))),
+                Poll::Ready(None) => break Poll::Ready(None),
+                Poll::Pending => break Poll::Pending,
+            }
+        };
+        // Waiting for data is not a stall; a frame or the end must be taken in time.
+        watched.handed_out = if next.is_pending() { None } else { Some(Instant::now()) };
+        next
+    }))
+}
+
+const MAX_BODY: usize = 64 * 1024 * 1024;
+const BODY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Middleware for `/v1`: checks the key and the limits, then reads the whole body within 120 s.
+pub async fn authenticate(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let format = error_format(request.uri().path(), request.headers());
     let (key, permits) = match admit(&state, request.headers(), format).await {
         Ok(admitted) => admitted,
@@ -133,15 +234,38 @@ pub async fn authenticate(State(state): State<AppState>, mut request: Request, n
             return error.into_response();
         }
     };
+    let (parts, body) = request.into_parts();
+    let bytes = match tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, MAX_BODY)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return GatewayError::new(
+                format,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "The request is too large.",
+            )
+            .into_response();
+        }
+        Err(_) => {
+            return GatewayError::new(
+                format,
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                "The request body came too slowly.",
+            )
+            .into_response();
+        }
+    };
+    let mut request = Request::from_parts(parts, Body::from(bytes));
     tracing::debug!(api_key = key.id, "request admitted");
+    let admission = Admission {
+        slots: Arc::new(Mutex::new(Some(permits))),
+    };
     request.extensions_mut().insert(key);
+    request.extensions_mut().insert(admission.clone());
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
-    let body = Body::from_stream(body.into_data_stream().map(move |chunk| {
-        let _held = &permits;
-        chunk
-    }));
-    Response::from_parts(parts, body)
+    Response::from_parts(parts, watch(body, admission))
 }
 
 type Rejection = (Reason, GatewayError);
@@ -165,7 +289,8 @@ async fn admit(
     };
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT id, expires_at, revoked_at, rpm_limit, concurrency_limit FROM api_keys WHERE key_hash = ?",
+        "SELECT id, expires_at, revoked_at, rpm_limit, tpm_limit, concurrency_limit, allowlist
+         FROM api_keys WHERE key_hash = ?",
     )
     .bind(sha256(presented.as_bytes()))
     .fetch_optional(&state.db)
@@ -212,6 +337,7 @@ async fn admit(
         });
         let entry = keys.entry(row.id).or_insert_with(|| KeyState {
             rpm: None,
+            tpm: None,
             active: Arc::default(),
             last_used_write: None,
         });
@@ -220,6 +346,11 @@ async fn admit(
             (Some(bucket), Some(limit)) => bucket.set_capacity(limit),
             (None, Some(limit)) => entry.rpm = Some(TokenBucket::new(limit)),
             (_, None) => entry.rpm = None,
+        }
+        match (entry.tpm.as_mut(), row.tpm_limit) {
+            (Some(bucket), Some(limit)) => bucket.set_capacity(limit),
+            (None, Some(limit)) => entry.tpm = Some(TokenBucket::new(limit)),
+            (_, None) => entry.tpm = None,
         }
         if entry.active.load(Ordering::SeqCst) >= concurrency {
             return Err(limited(
@@ -254,7 +385,11 @@ async fn admit(
         }
     }
 
-    Ok((ApiKey { id: row.id }, (per_key, global)))
+    let key = ApiKey {
+        id: row.id,
+        allowlist: serde_json::from_str(&row.allowlist).unwrap_or_default(),
+    };
+    Ok((key, (per_key, global)))
 }
 
 /// Reads the key from `Authorization: Bearer` or `x-api-key`.

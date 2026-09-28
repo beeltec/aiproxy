@@ -14,6 +14,7 @@ pub enum Reason {
     Revoked,
     Expired,
     RateLimited,
+    NotAllowed,
 }
 
 impl Reason {
@@ -24,6 +25,7 @@ impl Reason {
             Self::Revoked => "revoked",
             Self::Expired => "expired",
             Self::RateLimited => "rate_limited",
+            Self::NotAllowed => "not_allowed",
         }
     }
 }

@@ -9,6 +9,8 @@ mod gateway;
 mod rate_limit;
 mod settings;
 mod state;
+mod tokens;
+mod usage;
 mod web_assets;
 
 use std::future::IntoFuture;
@@ -32,6 +34,10 @@ use crate::web_assets::WebAssets;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const REFRESH_DRAIN: Duration = Duration::from_secs(120);
+/// Time for the stopped gateway requests to record their usage.
+const GATEWAY_DRAIN: Duration = Duration::from_secs(15);
+/// Time to save the queued usage rows at shutdown.
+const USAGE_DRAIN: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -91,6 +97,15 @@ async fn serve() -> anyhow::Result<()> {
         result = server.into_future() => result?,
         () = deadline => tracing::warn!("open connections did not close in time, stopping now"),
     }
+    // Running gateway requests stop now and record their usage.
+    state.stopping.cancel();
+    state.gateway_tasks.close();
+    if tokio::time::timeout(GATEWAY_DRAIN, state.gateway_tasks.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("gateway requests did not stop in time");
+    }
     // A refresh that is running must save its rotated token before the process ends. The budget
     // covers the 30 s OAuth request plus the save retries with their database waits.
     if tokio::time::timeout(REFRESH_DRAIN, state.refresher.drain())
@@ -98,6 +113,9 @@ async fn serve() -> anyhow::Result<()> {
         .is_err()
     {
         tracing::warn!("token refreshes did not end in time");
+    }
+    if tokio::time::timeout(USAGE_DRAIN, state.usage.flush()).await.is_err() {
+        tracing::warn!("usage rows were not saved in time");
     }
     state.rejected.flush(&state.db).await;
     tracing::info!("aiproxy stopped");

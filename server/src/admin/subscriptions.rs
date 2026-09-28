@@ -52,6 +52,16 @@ pub struct AccountView {
     access_expires_at: Option<i64>,
     created_at: i64,
     models: i64,
+    /// A usage-limit error blocks the account until this time.
+    limited_until: Option<i64>,
+    /// Usage limits from the last backend answer (usually a 5-hour and a weekly window).
+    primary_used_percent: Option<f64>,
+    primary_window_minutes: Option<i64>,
+    primary_reset_at: Option<i64>,
+    secondary_used_percent: Option<f64>,
+    secondary_window_minutes: Option<i64>,
+    secondary_reset_at: Option<i64>,
+    quota_updated_at: Option<i64>,
     /// Next scheduled refresh, computed from the plan.
     #[sqlx(default)]
     next_refresh_at: Option<i64>,
@@ -62,8 +72,12 @@ async fn load_accounts(state: &AppState, only: Option<i64>) -> ApiResult<Vec<Acc
         "SELECT a.id, a.email, a.plan_type, a.label, a.status, a.is_primary, a.failover_enabled, a.failover_order,
              a.refresh_mode, a.refresh_cron, a.last_refresh_at, a.last_refresh_error, a.last_refresh_failed_at,
              a.access_expires_at, a.created_at,
-             (SELECT COUNT(*) FROM chatgpt_account_models m WHERE m.account_id = a.id) AS models
-         FROM chatgpt_accounts a WHERE ?1 IS NULL OR a.id = ?1
+             (SELECT COUNT(*) FROM chatgpt_account_models m WHERE m.account_id = a.id) AS models,
+             a.limited_until, q.primary_used_percent, q.primary_window_minutes, q.primary_reset_at,
+             q.secondary_used_percent, q.secondary_window_minutes, q.secondary_reset_at,
+             q.updated_at AS quota_updated_at
+         FROM chatgpt_accounts a LEFT JOIN chatgpt_quota q ON q.account_id = a.id
+         WHERE ?1 IS NULL OR a.id = ?1
          ORDER BY a.is_primary DESC, a.failover_order, a.id",
     )
     .bind(only)
