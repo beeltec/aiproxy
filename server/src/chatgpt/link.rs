@@ -25,9 +25,18 @@ struct Flow {
 #[derive(Clone)]
 pub enum FlowState {
     Device,
-    Pkce { verifier: String, oauth_state: String },
-    Done { account: i64 },
-    Failed { message: String },
+    Pkce {
+        verifier: String,
+        oauth_state: String,
+    },
+    /// The code exchange of a PKCE flow is running.
+    Completing,
+    Done {
+        account: i64,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 impl LinkFlows {
@@ -74,9 +83,7 @@ impl LinkFlows {
         let FlowState::Pkce { verifier, oauth_state } = flow.state.clone() else {
             return None;
         };
-        flow.state = FlowState::Failed {
-            message: "The sign-in is being completed.".into(),
-        };
+        flow.state = FlowState::Completing;
         Some((verifier, oauth_state))
     }
 }

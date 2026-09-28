@@ -2,7 +2,7 @@
 //! same old token would break the account. One refresh per account runs at a time; callers that
 //! wait get the result of the refresh before them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +28,8 @@ const RETRY_DELAYS: [Duration; 3] = [
 #[derive(Default)]
 pub struct Refresher {
     locks: Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
-    retrying: Mutex<HashSet<i64>>,
+    /// Accounts with a running retry sequence, and the credential generation it is for.
+    retrying: Mutex<HashMap<i64, i64>>,
 }
 
 /// Why the refresh runs.
@@ -121,7 +122,9 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
             last_refresh_error.unwrap_or_else(|| "the refresh failed".into()),
         ));
     }
-    if trigger == Trigger::Scheduled && state.refresher.retrying.lock().expect("retrying").contains(&account) {
+    if trigger == Trigger::Scheduled
+        && state.refresher.retrying.lock().expect("retrying").get(&account) == Some(&generation)
+    {
         return Err(Failure::Temporary("retries after a failed refresh are running".into()));
     }
     let now = now();
@@ -213,15 +216,25 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
 /// Tries again after 30 s, 2 min and 10 min, once per account at a time. The sequence stops
 /// when the credentials change (re-link).
 fn start_retries(state: &AppState, account: i64, generation: i64) {
-    if !state.refresher.retrying.lock().expect("retrying").insert(account) {
-        return;
+    {
+        let mut retrying = state.refresher.retrying.lock().expect("retrying");
+        if retrying.get(&account) == Some(&generation) {
+            return;
+        }
+        retrying.insert(account, generation);
     }
+    let started = now();
     let state = state.clone();
     tokio::spawn(async move {
         let mut failing = true;
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
-            if current_generation(&state, account).await != Some(generation) {
+            // Stop when the account was linked again or another refresh succeeded meanwhile.
+            let Some((current, last_refresh_at)) = progress(&state, account).await else {
+                failing = false;
+                break;
+            };
+            if current != generation || last_refresh_at >= started {
                 failing = false;
                 break;
             }
@@ -236,12 +249,15 @@ fn start_retries(state: &AppState, account: i64, generation: i64) {
         if failing {
             give_up(&state, account, generation).await;
         }
-        state.refresher.retrying.lock().expect("retrying").remove(&account);
+        let mut retrying = state.refresher.retrying.lock().expect("retrying");
+        if retrying.get(&account) == Some(&generation) {
+            retrying.remove(&account);
+        }
     });
 }
 
-async fn current_generation(state: &AppState, account: i64) -> Option<i64> {
-    sqlx::query_scalar("SELECT credential_generation FROM chatgpt_accounts WHERE id = ?")
+async fn progress(state: &AppState, account: i64) -> Option<(i64, i64)> {
+    sqlx::query_as("SELECT credential_generation, last_refresh_at FROM chatgpt_accounts WHERE id = ?")
         .bind(account)
         .fetch_optional(&state.db)
         .await

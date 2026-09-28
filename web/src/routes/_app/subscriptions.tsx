@@ -71,6 +71,8 @@ type Account = Schemas["AccountView"];
 export const accountsQuery = queryOptions({
 	queryKey: ["chatgpt-accounts"],
 	queryFn: () => call(api.GET("/chatgpt/accounts")),
+	// Scheduled refreshes and retries change the accounts in the background.
+	refetchInterval: 30_000,
 });
 
 export const Route = createFileRoute("/_app/subscriptions")({
@@ -397,35 +399,11 @@ function LinkDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
 
 function LinkFlow({ onClose }: { onClose: () => void }) {
 	const queryClient = useQueryClient();
-	const [flow, setFlow] = useState<string | null>(null);
-	const status = useQuery({
-		queryKey: ["link-flow", flow],
-		queryFn: () =>
-			call(
-				api.GET("/chatgpt/link/{flow}", {
-					params: { path: { flow: flow ?? "" } },
-				}),
-			),
-		enabled: flow !== null,
-		refetchInterval: (query) =>
-			query.state.status !== "error" && query.state.data?.status === "pending"
-				? 3000
-				: false,
-		retry: false,
-	});
-	// An expired flow answers 404; show it like a failed flow.
-	const current: Schemas["LinkStatus"] | undefined = status.error
-		? { status: "failed", message: status.error.message }
-		: status.data;
-	const done = current?.status === "done";
-
-	useEffect(() => {
-		if (done) {
-			void queryClient.invalidateQueries({ queryKey: accountsQuery.queryKey });
-			toast.success("The account is linked.");
-			onClose();
-		}
-	}, [done, onClose, queryClient]);
+	const onLinked = () => {
+		void queryClient.invalidateQueries({ queryKey: accountsQuery.queryKey });
+		toast.success("The account is linked.");
+		onClose();
+	};
 
 	return (
 		<>
@@ -441,11 +419,12 @@ function LinkFlow({ onClose }: { onClose: () => void }) {
 					<TabsTrigger value="device">Code on another device</TabsTrigger>
 					<TabsTrigger value="browser">Sign in here</TabsTrigger>
 				</TabsList>
-				<TabsContent value="device" className="pt-3">
-					<DeviceLink onFlow={setFlow} status={current} />
+				{/* Both panels stay mounted, so switching tabs keeps a started sign-in. */}
+				<TabsContent value="device" keepMounted className="pt-3">
+					<DeviceLink onLinked={onLinked} />
 				</TabsContent>
-				<TabsContent value="browser" className="pt-3">
-					<BrowserLink onFlow={setFlow} status={current} />
+				<TabsContent value="browser" keepMounted className="pt-3">
+					<BrowserLink onLinked={onLinked} />
 				</TabsContent>
 			</Tabs>
 			<DialogFooter>
@@ -457,23 +436,54 @@ function LinkFlow({ onClose }: { onClose: () => void }) {
 	);
 }
 
+/** Polls a link flow until it ends. An expired flow (404) counts as failed. Closing the
+ * dialog cancels the flow, so the server stops waiting for it. */
+function useFlowStatus(
+	flow: string | undefined,
+	onLinked: () => void,
+): Schemas["LinkStatus"] | undefined {
+	useEffect(() => {
+		if (!flow) return;
+		return () => {
+			void api.DELETE("/chatgpt/link/{flow}", { params: { path: { flow } } });
+		};
+	}, [flow]);
+	const status = useQuery({
+		queryKey: ["link-flow", flow],
+		queryFn: () =>
+			call(
+				api.GET("/chatgpt/link/{flow}", {
+					params: { path: { flow: flow ?? "" } },
+				}),
+			),
+		enabled: flow !== undefined,
+		refetchInterval: (query) =>
+			query.state.status !== "error" && query.state.data?.status === "pending"
+				? 3000
+				: false,
+		retry: false,
+	});
+	const current: Schemas["LinkStatus"] | undefined = status.error
+		? { status: "failed", message: status.error.message }
+		: status.data;
+	const done = current?.status === "done";
+	useEffect(() => {
+		if (done) onLinked();
+	}, [done, onLinked]);
+	return current;
+}
+
 function FlowMessage({ status }: { status?: Schemas["LinkStatus"] }) {
 	if (status?.status !== "failed") return null;
 	return <FieldError>{status.message}</FieldError>;
 }
 
-function DeviceLink({
-	onFlow,
-	status,
-}: {
-	onFlow: (flow: string) => void;
-	status?: Schemas["LinkStatus"];
-}) {
+function DeviceLink({ onLinked }: { onLinked: () => void }) {
 	const start = useMutation({
 		mutationFn: () => call(api.POST("/chatgpt/link/device")),
-		onSuccess: (link) => onFlow(link.flow),
 	});
 	const link = start.data;
+	const status = useFlowStatus(link?.flow, onLinked);
 
 	if (!link) {
 		return (
@@ -547,19 +557,13 @@ function DeviceLink({
 	);
 }
 
-function BrowserLink({
-	onFlow,
-	status,
-}: {
-	onFlow: (flow: string) => void;
-	status?: Schemas["LinkStatus"];
-}) {
+function BrowserLink({ onLinked }: { onLinked: () => void }) {
 	const queryClient = useQueryClient();
 	const [pasted, setPasted] = useState("");
 	const start = useMutation({
 		mutationFn: () => call(api.POST("/chatgpt/link/pkce")),
-		onSuccess: (link) => onFlow(link.flow),
 	});
+	const status = useFlowStatus(start.data?.flow, onLinked);
 	const complete = useMutation({
 		mutationFn: (flow: string) =>
 			call(

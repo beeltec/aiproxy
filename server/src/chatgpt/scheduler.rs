@@ -72,12 +72,10 @@ pub async fn run(state: AppState) {
             () = state.schedule_changed.notified() => continue,
         }
 
-        let Some(earliest) = earliest else { continue };
-        if Utc::now() < earliest {
-            continue;
-        }
+        // After a late wake-up (suspend, clock change) every overdue account runs.
+        let woke = Utc::now();
         for (account, at) in due {
-            if at <= earliest {
+            if at <= woke {
                 let state = state.clone();
                 tokio::spawn(async move {
                     // Errors are stored on the account and shown in the dashboard.
