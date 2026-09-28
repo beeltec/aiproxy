@@ -409,7 +409,9 @@ async fn stream_events(
             };
             // Only an invalid request is the fault of the client; other failures are upstream errors.
             let invalid = error["type"] == "invalid_request_error"
-                || error["code"].as_str().is_some_and(|code| code.starts_with("invalid"));
+                || error["code"]
+                    .as_str()
+                    .is_some_and(|code| code.starts_with("invalid") || code == "context_length_exceeded");
             let status = if invalid { 400 } else { 502 };
             let error = codex::classify(status, &json!({ "error": error }).to_string(), None);
             return match error {

@@ -32,6 +32,7 @@ pub async fn prepare(
         .ok_or_else(|| bad("The field `model` is missing."))?;
     reject_stored_state(&body)?;
     reject_hosted_tools(&body)?;
+    check_options(&body)?;
     let route = route(state, key, requested).await?;
     check_inputs(&body, &route.capabilities, &route.qualified)?;
     clamp_effort(&mut body, &route.capabilities);
@@ -81,6 +82,11 @@ pub async fn prepare(
     })
 }
 
+/// A body that is not valid JSON, as an error in the format of the client.
+pub fn bad_json(rejection: &axum::extract::rejection::JsonRejection) -> Failure {
+    Failure::new(rejection.status(), "invalid_request", rejection.body_text())
+}
+
 /// Finds the enabled model for a name and checks that the key may use it.
 pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Route, Failure> {
     let route = match routing::resolve(&state.db, requested).await {
@@ -120,6 +126,27 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
 }
 
 const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const SERVICE_TIERS: [&str; 6] = ["auto", "default", "flex", "scale", "priority", "fast"];
+
+/// Only known values reach the backend and the usage rows.
+fn check_options(body: &Value) -> Result<(), Failure> {
+    let known = |value: &Value, list: &[&str]| value.is_null() || value.as_str().is_some_and(|v| list.contains(&v));
+    if !known(&body["reasoning"]["effort"], &EFFORTS) {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("Unknown reasoning effort. Use one of: {}.", EFFORTS.join(", ")),
+        ));
+    }
+    if !known(&body["service_tier"], &SERVICE_TIERS) {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("Unknown service tier. Use one of: {}.", SERVICE_TIERS.join(", ")),
+        ));
+    }
+    Ok(())
+}
 
 /// An effort that the model does not support becomes the nearest supported one.
 fn clamp_effort(body: &mut Value, capabilities: &Value) {

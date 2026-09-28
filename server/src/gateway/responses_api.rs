@@ -1,6 +1,7 @@
 //! `POST /v1/responses` for Responses clients. The request goes to the backend almost as it is.
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
@@ -17,8 +18,12 @@ pub async fn create(
     Extension(key): Extension<ApiKey>,
     Extension(admission): Extension<Admission>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return error(request::bad_json(&rejection)),
+    };
     let hint = headers
         .get("session_id")
         .or_else(|| headers.get("session-id"))

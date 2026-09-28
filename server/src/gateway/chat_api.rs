@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -20,8 +21,12 @@ pub async fn create(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
     Extension(admission): Extension<Admission>,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return error(request::bad_json(&rejection)),
+    };
     let converted = match to_responses(&body) {
         Ok(converted) => converted,
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
@@ -111,10 +116,25 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
             .collect();
         out.insert("tools".into(), Value::Array(tools));
     }
-    if !body["web_search_options"].is_null() {
+    let search = &body["web_search_options"];
+    if !search.is_null() {
+        let mut tool = json!({ "type": "web_search" });
+        if let Some(size) = search["search_context_size"].as_str() {
+            tool["search_context_size"] = json!(size);
+        }
+        let location = &search["user_location"]["approximate"];
+        if location.is_object() {
+            tool["user_location"] = json!({
+                "type": "approximate",
+                "city": location["city"],
+                "region": location["region"],
+                "country": location["country"],
+                "timezone": location["timezone"],
+            });
+        }
         let tools = out.entry("tools").or_insert_with(|| json!([]));
         if let Some(list) = tools.as_array_mut() {
-            list.push(json!({ "type": "web_search" }));
+            list.push(tool);
         }
     }
     match &body["tool_choice"] {

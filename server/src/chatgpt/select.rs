@@ -15,6 +15,7 @@ struct Candidate {
     primary_reset_at: Option<i64>,
     secondary_used_percent: Option<f64>,
     secondary_reset_at: Option<i64>,
+    quota_updated_at: Option<i64>,
 }
 
 pub enum Selection {
@@ -34,7 +35,8 @@ pub async fn accounts_for(state: &AppState, model_id: i64) -> Result<Selection, 
     let settings = settings::load(&state.db).await?;
     let rows: Vec<Candidate> = sqlx::query_as(
         "SELECT a.id, a.is_primary, a.failover_enabled, a.status, a.limited_until,
-             q.primary_used_percent, q.primary_reset_at, q.secondary_used_percent, q.secondary_reset_at
+             q.primary_used_percent, q.primary_reset_at, q.secondary_used_percent, q.secondary_reset_at,
+             q.updated_at AS quota_updated_at
          FROM chatgpt_accounts a
          JOIN chatgpt_account_models m ON m.account_id = a.id AND m.model_id = ?
          LEFT JOIN chatgpt_quota q ON q.account_id = a.id
@@ -53,18 +55,20 @@ pub async fn accounts_for(state: &AppState, model_id: i64) -> Result<Selection, 
         .iter()
         .filter(|c| c.is_primary || (settings.failover.enabled && c.failover_enabled))
         .collect();
-    let over =
-        |used: Option<f64>, reset: Option<i64>| used.is_some_and(|u| u >= threshold) && reset.is_none_or(|r| r > now);
     let blocked_until = |c: &Candidate| -> Option<i64> {
         let mut until = c.limited_until.filter(|u| *u > now);
         // The proactive threshold applies only with failover; without it the primary is used
-        // until the upstream refuses.
+        // until the upstream refuses. A reading without a reset time is kept for one hour.
         if settings.failover.enabled {
-            if over(c.primary_used_percent, c.primary_reset_at) {
-                until = until.max(c.primary_reset_at.or(Some(now + 3600)));
-            }
-            if over(c.secondary_used_percent, c.secondary_reset_at) {
-                until = until.max(c.secondary_reset_at.or(Some(now + 3600)));
+            let stale_at = c.quota_updated_at.map(|at| at + 3600);
+            for (used, reset) in [
+                (c.primary_used_percent, c.primary_reset_at),
+                (c.secondary_used_percent, c.secondary_reset_at),
+            ] {
+                let end = reset.or(stale_at);
+                if used.is_some_and(|u| u >= threshold) && end.is_some_and(|e| e > now) {
+                    until = until.max(end);
+                }
             }
         }
         until

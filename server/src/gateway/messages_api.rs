@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -27,8 +28,12 @@ pub async fn create(
     Extension(key): Extension<ApiKey>,
     Extension(admission): Extension<Admission>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return error(request::bad_json(&rejection)),
+    };
     let converted = match to_responses(&body) {
         Ok(converted) => converted,
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
@@ -61,8 +66,12 @@ pub async fn create(
 pub async fn count_tokens(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => return error(request::bad_json(&rejection)),
+    };
     let started = std::time::Instant::now();
     let converted = match to_responses(&body) {
         Ok(converted) => converted,
