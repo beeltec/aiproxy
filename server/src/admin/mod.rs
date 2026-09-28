@@ -5,7 +5,10 @@ mod admins;
 pub mod auth;
 mod session;
 
+use std::time::Duration;
+
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -42,13 +45,34 @@ pub fn openapi_json() -> String {
     api.to_pretty_json().expect("OpenAPI document serializes")
 }
 
-/// Blocks cross-site writes and disables caching of API answers.
+const MAX_BODY: usize = 1024 * 1024;
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Blocks cross-site writes, reads the whole body before the handler runs, and disables caching
+/// of API answers. With the body read first, the session check in the handler happens after the
+/// client sent everything, so a slow body cannot outlive a revoked session.
 async fn protect(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let safe = matches!(*request.method(), Method::GET | Method::HEAD);
     if !safe && !same_origin(&state, &request) {
         return ApiError::new(StatusCode::FORBIDDEN, "cross_site", "Cross-site request blocked.").into_response();
     }
-    let mut response = next.run(request).await;
+    let (parts, body) = request.into_parts();
+    let bytes = match tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, MAX_BODY)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request is too large.")
+                .into_response();
+        }
+        Err(_) => {
+            return ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                "The request body came too slowly.",
+            )
+            .into_response();
+        }
+    };
+    let mut response = next.run(Request::from_parts(parts, Body::from(bytes))).await;
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

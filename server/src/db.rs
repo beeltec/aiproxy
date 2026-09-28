@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -7,8 +6,10 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 pub async fn open(data_dir: &Path) -> anyhow::Result<SqlitePool> {
+    std::fs::create_dir_all(data_dir).with_context(|| format!("cannot create data dir {}", data_dir.display()))?;
     let path = data_dir.join("aiproxy.db");
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)

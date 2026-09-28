@@ -123,7 +123,9 @@ async fn update_admin(
     Path(id): Path<i64>,
     Json(req): Json<UpdateAdmin>,
 ) -> ApiResult<Json<AdminView>> {
-    // One statement, so the check and the change cannot race.
+    // One statement, so the check and the change cannot race. Session revocation is in the
+    // same transaction, so a disabled admin never keeps a session.
+    let mut tx = state.db.begin().await?;
     let admin: Option<AdminView> = sqlx::query_as(
         "UPDATE admins SET disabled = ?1 WHERE id = ?2
              AND (?1 = 0 OR (SELECT COUNT(*) FROM admins WHERE disabled = 0 AND id != ?2) > 0)
@@ -131,15 +133,16 @@ async fn update_admin(
     )
     .bind(req.disabled)
     .bind(id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
-    let admin = match admin {
-        Some(admin) => admin,
-        None => return Err(missing_or_last(&state, id).await),
+    let Some(admin) = admin else {
+        drop(tx);
+        return Err(missing_or_last(&state, id).await);
     };
     if req.disabled {
-        session::delete_all_of(&state.db, id, None).await?;
+        session::delete_all_of(&mut *tx, id, None).await?;
     }
+    tx.commit().await?;
     Ok(Json(admin))
 }
 

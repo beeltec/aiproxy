@@ -49,8 +49,6 @@ async fn serve() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    std::fs::create_dir_all(&config.data_dir)
-        .with_context(|| format!("cannot create data dir {}", config.data_dir.display()))?;
 
     let db = db::open(&config.data_dir).await?;
     let bind = config.bind;

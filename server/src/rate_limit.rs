@@ -46,16 +46,6 @@ impl SlidingWindow {
         }
     }
 
-    /// True when the key is blocked.
-    pub fn is_full(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let mut entries = self.entries.lock().expect("rate limit lock");
-        entries.get_mut(key).is_some_and(|entry| {
-            entry.prune(now, self.window);
-            entry.blocked_since.is_some()
-        })
-    }
-
     /// Records an event. Returns false (and records nothing) when the key is blocked.
     pub fn try_record(&self, key: &str) -> bool {
         let now = Instant::now();
@@ -73,6 +63,17 @@ impl SlidingWindow {
             entry.blocked_since = Some(now);
         }
         true
+    }
+
+    /// Takes back the newest event of a key, for an event that was recorded in advance.
+    pub fn release(&self, key: &str) {
+        let mut entries = self.entries.lock().expect("rate limit lock");
+        if let Some(entry) = entries.get_mut(key) {
+            entry.events.pop_back();
+            if entry.events.len() < self.limit {
+                entry.blocked_since = None;
+            }
+        }
     }
 
     pub fn clear(&self, key: &str) {

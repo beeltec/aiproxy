@@ -178,7 +178,17 @@ async fn login(
         return Err(invalid());
     }
     let user_key = format!("user:{}", req.username.to_lowercase());
-    if limits.failures.is_full(&ip_key) || limits.failures.is_full(&user_key) {
+    // Each attempt counts as a failure before the password check, so parallel attempts cannot
+    // pass the limit. A successful login takes the count back.
+    let ip_reserved = limits.failures.try_record(&ip_key);
+    let user_reserved = limits.failures.try_record(&user_key);
+    if !ip_reserved || !user_reserved {
+        if ip_reserved {
+            limits.failures.release(&ip_key);
+        }
+        if user_reserved {
+            limits.failures.release(&user_key);
+        }
         return Err(ApiError::too_many_requests("Too many failed logins. Wait 15 minutes."));
     }
 
@@ -198,11 +208,10 @@ async fn login(
         None => None,
     };
     let Some((cookie, me)) = session else {
-        limits.failures.try_record(&ip_key);
-        limits.failures.try_record(&user_key);
         return Err(invalid());
     };
 
+    limits.failures.release(&ip_key);
     limits.failures.clear(&user_key);
     Ok((jar.add(cookie), Json(me)))
 }
