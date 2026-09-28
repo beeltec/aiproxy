@@ -906,6 +906,7 @@ export interface components {
 			max_output?: number | null;
 			mode?: string | null;
 			thinking?: components["schemas"]["Thinking"] | null;
+			thinking_always_on?: boolean | null;
 		};
 		/** @description The capabilities that an admin can change. */
 		CapabilityOverrides: {
@@ -920,6 +921,7 @@ export interface components {
 			/** Format: int64 */
 			max_output?: number | null;
 			thinking?: components["schemas"]["Thinking"] | null;
+			thinking_always_on?: boolean | null;
 		};
 		ChangePassword: {
 			current_password: string;

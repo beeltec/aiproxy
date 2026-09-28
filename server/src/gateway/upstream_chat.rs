@@ -485,11 +485,12 @@ impl ChatDecoder {
             let index = detail["index"].as_i64().unwrap_or(self.details.len() as i64);
             let entry = self.details.entry(index).or_insert_with(|| json!({}));
             for (key, value) in detail.as_object().into_iter().flatten() {
-                match (entry.get(key).and_then(Value::as_str), value.as_str()) {
-                    (Some(old), Some(new)) if matches!(key.as_str(), "text" | "summary" | "data") => {
-                        entry[key] = json!(format!("{old}{new}"));
+                // Text parts arrive in pieces; they are appended in place.
+                match (&mut entry[key], value.as_str()) {
+                    (Value::String(text), Some(piece)) if matches!(key.as_str(), "text" | "summary" | "data") => {
+                        text.push_str(piece);
                     }
-                    _ => entry[key] = value.clone(),
+                    (slot, _) => *slot = value.clone(),
                 }
             }
         }

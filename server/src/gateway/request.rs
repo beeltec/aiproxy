@@ -74,7 +74,7 @@ pub async fn prepare(
     }
     check_inputs(&body, &route.capabilities, &route.qualified)?;
     if let Some(alias) = &route.alias {
-        apply_alias(&mut body, alias);
+        apply_alias(&mut body, alias, format);
     }
     // Anthropic efforts have other names; the Anthropic encoder maps them itself, and `none`
     // must stay to turn thinking off.
@@ -179,15 +179,16 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
     Ok(route)
 }
 
-/// Alias defaults for values that the client did not set.
-pub(super) fn apply_alias(body: &mut Value, alias: &Alias) {
+/// Alias defaults for values that the client did not set. Chat and Messages clients have no
+/// summary setting (their converters only put `auto`), so there the alias summary always wins.
+fn apply_alias(body: &mut Value, alias: &Alias, format: &str) {
     if let Some(effort) = &alias.effort
         && body["reasoning"]["effort"].is_null()
     {
         body["reasoning"]["effort"] = json!(effort);
     }
     if let Some(summary) = &alias.summary
-        && body["reasoning"]["summary"].is_null()
+        && (body["reasoning"]["summary"].is_null() || format != "responses")
     {
         body["reasoning"]["summary"] = json!(summary);
     }

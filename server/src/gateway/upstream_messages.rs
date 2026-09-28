@@ -70,7 +70,10 @@ fn budget(effort: &str) -> i64 {
 fn apply_effort(body: &mut Value, effort: &str, client_max: Option<i64>, capabilities: &Value) {
     let model_max = capabilities["max_output"].as_i64();
     if effort == "none" {
-        body["thinking"] = json!({ "type": "disabled" });
+        // Some models always think; they reject `disabled`.
+        if capabilities["thinking_always_on"] != true {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
         return;
     }
     if capabilities["efforts"].as_array().is_some_and(|e| !e.is_empty()) {
@@ -121,16 +124,34 @@ pub fn fit_thinking_budget(body: &mut Value) {
 
 /// Anthropic refuses forced tools with manual thinking, and some models also with adaptive
 /// thinking. Then thinking is left out for the request.
-fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) {
+/// A model that always thinks cannot leave thinking out; then the request is refused.
+fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) -> Result<(), &'static str> {
     let forced = matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool"));
     let thinking = body["thinking"]["type"].as_str();
     let allowed = thinking == Some("adaptive") && capabilities["forced_tools_with_thinking"] == true;
-    if forced
-        && matches!(thinking, Some("enabled" | "adaptive"))
-        && !allowed
+    let always_on = capabilities["thinking_always_on"] == true;
+    if !forced || allowed || !(always_on || matches!(thinking, Some("enabled" | "adaptive"))) {
+        return Ok(());
+    }
+    if always_on {
+        return Err(
+            "This model always thinks, and it cannot use a forced tool choice with thinking. Use tool choice auto.",
+        );
+    }
+    if let Some(map) = body.as_object_mut() {
+        map.remove("thinking");
+    }
+    Ok(())
+}
+
+/// Anthropic refuses sampling options with thinking, except the defaults.
+fn drop_sampling_with_thinking(body: &mut Value) {
+    if matches!(body["thinking"]["type"].as_str(), Some("enabled" | "adaptive"))
         && let Some(map) = body.as_object_mut()
     {
-        map.remove("thinking");
+        for field in ["temperature", "top_p", "top_k"] {
+            map.remove(field);
+        }
     }
 }
 
@@ -182,11 +203,12 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
         {
             let client_max = body["max_tokens"].as_i64();
             apply_effort(body, effort, client_max, capabilities);
+            drop_sampling_with_thinking(body);
         }
         if alias.fast && body["speed"].is_null() && capabilities["fast"] == true {
             body["speed"] = json!("fast");
         }
-        drop_thinking_for_forced_tools(body, capabilities);
+        drop_thinking_for_forced_tools(body, capabilities).map_err(bad)?;
     }
     let mut betas = Vec::new();
     if body["speed"] == "fast" {
@@ -439,14 +461,20 @@ pub fn encode(
                 .any(|b| matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")))
         })
     });
-    if has_tool_use
-        && !has_thinking
-        && matches!(body_out["thinking"]["type"].as_str(), Some("enabled" | "adaptive"))
-        && let Some(map) = body_out.as_object_mut()
-    {
-        map.remove("thinking");
+    if has_tool_use && !has_thinking {
+        if capabilities["thinking_always_on"] == true {
+            return Err(
+                "The thinking of the last tool call is not known any more (for example after a restart). Start the tool loop again."
+                    .into(),
+            );
+        }
+        if matches!(body_out["thinking"]["type"].as_str(), Some("enabled" | "adaptive"))
+            && let Some(map) = body_out.as_object_mut()
+        {
+            map.remove("thinking");
+        }
     }
-    drop_thinking_for_forced_tools(&mut body_out, capabilities);
+    drop_thinking_for_forced_tools(&mut body_out, capabilities)?;
     let thinking_on = matches!(body_out["thinking"]["type"].as_str(), Some("enabled" | "adaptive"));
     if !thinking_on {
         for field in ["temperature", "top_p"] {
@@ -893,9 +921,13 @@ impl MessagesDecoder {
     }
 }
 
+/// Appends in place: a copy of the whole text per delta would make long streams quadratic.
 fn append(target: &mut Value, field: &str, piece: &Value) {
-    let old = target[field].as_str().unwrap_or_default().to_owned();
-    target[field] = json!(format!("{old}{}", piece.as_str().unwrap_or_default()));
+    let piece = piece.as_str().unwrap_or_default();
+    match &mut target[field] {
+        Value::String(text) => text.push_str(piece),
+        other => *other = json!(piece),
+    }
 }
 
 impl Decoder for MessagesDecoder {

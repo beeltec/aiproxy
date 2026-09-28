@@ -558,10 +558,13 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
         Wire::Chat => {
             if let Some(effort) = effort {
                 match kind {
-                    Kind::OpenRouter
-                        if body["reasoning_effort"].is_null() && body["reasoning"]["max_tokens"].is_null() =>
-                    {
-                        body["reasoning"]["effort"] = json!(effort);
+                    // An explicit token budget stays; else the effort field that the client used.
+                    Kind::OpenRouter if body["reasoning"]["max_tokens"].is_null() => {
+                        if body["reasoning_effort"].is_string() {
+                            body["reasoning_effort"] = json!(effort);
+                        } else {
+                            body["reasoning"]["effort"] = json!(effort);
+                        }
                     }
                     Kind::OpenRouter => {}
                     _ => body["reasoning_effort"] = json!(effort),
@@ -664,8 +667,10 @@ fn record_native(wire: Wire, answer: &Value, ttl: Option<&str>, outcome: &mut Ou
             if answer["usage"].is_object() {
                 outcome.tokens = Some(upstream_chat::tokens(&answer["usage"]));
             }
+            outcome.service_tier = answer["service_tier"].as_str().map(str::to_owned);
         }
         Wire::Messages => {
+            outcome.service_tier = answer["usage"]["service_tier"].as_str().map(str::to_owned);
             if answer["usage"].is_object() {
                 outcome.tokens = Some(Tokens::from_anthropic(&answer["usage"], ttl));
                 outcome.web_search_calls = answer["usage"]["server_tool_use"]["web_search_requests"]
@@ -754,6 +759,12 @@ impl Tap {
                     text(&choice["delta"]["content"]);
                     text(&choice["delta"]["reasoning_content"]);
                     text(&choice["delta"]["reasoning"]);
+                    for call in choice["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                        text(&call["function"]["arguments"]);
+                    }
+                }
+                if let Some(tier) = json["service_tier"].as_str() {
+                    outcome.service_tier = Some(tier.to_owned());
                 }
                 if json["usage"].is_object() {
                     outcome.tokens = Some(upstream_chat::tokens(&json["usage"]));
@@ -766,7 +777,10 @@ impl Tap {
             }
             Wire::Messages => {
                 match json["type"].as_str().unwrap_or(event) {
-                    "message_start" => self.anthropic_usage = json["message"]["usage"].clone(),
+                    "message_start" => {
+                        self.anthropic_usage = json["message"]["usage"].clone();
+                        outcome.service_tier = self.anthropic_usage["service_tier"].as_str().map(str::to_owned);
+                    }
                     "content_block_delta" => {
                         text(&json["delta"]["text"]);
                         text(&json["delta"]["thinking"]);

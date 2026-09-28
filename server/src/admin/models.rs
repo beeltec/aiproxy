@@ -88,6 +88,7 @@ pub struct Capabilities {
     mode: Option<String>,
     thinking: Option<Thinking>,
     forced_tools_with_thinking: Option<bool>,
+    thinking_always_on: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -119,6 +120,8 @@ pub struct CapabilityOverrides {
     thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     forced_tools_with_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_always_on: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]

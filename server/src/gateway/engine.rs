@@ -122,6 +122,8 @@ pub(super) struct Outcome {
     pub final_response: Option<Value>,
     /// Usage in billing categories, when the upstream format is not OpenAI's.
     pub tokens: Option<Tokens>,
+    /// The service tier that a native Chat or Messages answer reported.
+    pub service_tier: Option<String>,
     pub first_token_ms: Option<i64>,
     pub streamed_chars: usize,
     pub attempts: i64,
@@ -568,7 +570,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         resolved_model: Some(job.route.qualified.clone()),
         effort: job.body["reasoning"]["effort"].as_str().map(str::to_owned),
         service_tier_requested: job.body["service_tier"].as_str().map(str::to_owned),
-        service_tier_reported: response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned),
+        service_tier_reported: outcome
+            .service_tier
+            .clone()
+            .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
         streamed: job.stream,
         status_code: outcome.status,
         error_kind: outcome.error_kind.clone(),

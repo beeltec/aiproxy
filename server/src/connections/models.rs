@@ -6,7 +6,8 @@
 //! - `context_window`, `max_output`: token limits
 //! - `endpoints`: OpenAI endpoints (`chat`, `responses`); `chat_tools`: false when function tools
 //!   work only on Responses; `mode`: the LiteLLM mode (`chat`, `embedding`, ...)
-//! - `thinking`: Anthropic thinking types (`adaptive`, `enabled`); `forced_tools_with_thinking`
+//! - `thinking`: Anthropic thinking types (`adaptive`, `enabled`); `forced_tools_with_thinking`;
+//!   `thinking_always_on`: the model cannot turn thinking off
 
 use std::time::Duration;
 
@@ -214,6 +215,13 @@ fn openai_capabilities(catalog: &Catalog, id: &str) -> Value {
         }
         out.insert("endpoints".into(), json!(list));
     }
+    // Rules from the OpenAI model pages that the catalogs do not have (or have wrong).
+    if id.starts_with("gpt-audio") || id.contains("-audio-preview") {
+        out.insert("endpoints".into(), json!(["chat"]));
+    }
+    if id.starts_with("gpt-6-astra") {
+        out.insert("chat_tools".into(), json!(false));
+    }
     out.retain(|_, v| !v.is_null());
     Value::Object(out)
 }
@@ -246,6 +254,12 @@ fn anthropic_capabilities(catalog: &Catalog, model: &Value) -> Value {
                 "enabled": supported(&caps["thinking"]["types"]["enabled"]),
             }),
         );
+    }
+    if catalog
+        .litellm(Kind::Anthropic, id)
+        .is_some_and(|entry| entry["thinking_always_on"] == true)
+    {
+        out.insert("thinking_always_on".into(), json!(true));
     }
     for (field, key) in [("max_input_tokens", "context_window"), ("max_tokens", "max_output")] {
         if let Some(value) = model[field].as_i64().filter(|v| *v > 0) {

@@ -229,8 +229,15 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     if let Some(reasoning) = reasoning(body) {
         out.insert("reasoning".into(), reasoning);
     }
-    if body["speed"] == "fast" {
-        out.insert("service_tier".into(), json!("priority"));
+    // An explicit standard speed keeps a fast alias from applying.
+    match body["speed"].as_str() {
+        Some("fast") => {
+            out.insert("service_tier".into(), json!("priority"));
+        }
+        Some("standard") => {
+            out.insert("service_tier".into(), json!("default"));
+        }
+        _ => {}
     }
     if let Some(max) = body["max_tokens"].as_i64() {
         out.insert("max_output_tokens".into(), json!(max));

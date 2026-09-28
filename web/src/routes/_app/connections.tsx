@@ -950,6 +950,7 @@ type Draft = {
 	responses: boolean;
 	chatTools: boolean;
 	forcedTools: boolean;
+	alwaysThinks: boolean;
 };
 
 function toDraft(c: Capabilities): Draft {
@@ -963,6 +964,7 @@ function toDraft(c: Capabilities): Draft {
 		responses: !c.endpoints || c.endpoints.includes("responses"),
 		chatTools: c.chat_tools ?? true,
 		forcedTools: c.forced_tools_with_thinking ?? false,
+		alwaysThinks: c.thinking_always_on ?? false,
 	};
 }
 
@@ -999,6 +1001,8 @@ function toOverrides(
 	}
 	if (kind === "anthropic" && draft.forcedTools !== base.forcedTools)
 		out.forced_tools_with_thinking = draft.forcedTools;
+	if (kind === "anthropic" && draft.alwaysThinks !== base.alwaysThinks)
+		out.thinking_always_on = draft.alwaysThinks;
 	return out;
 }
 
@@ -1193,12 +1197,20 @@ function CapabilityForm({
 					</>
 				)}
 				{kind === "anthropic" && (
-					<Toggle
-						label="Forced tools with thinking"
-						description="Off: a forced tool choice turns thinking off for that request."
-						checked={draft.forcedTools}
-						onChange={(v) => set("forcedTools", v)}
-					/>
+					<>
+						<Toggle
+							label="Forced tools with thinking"
+							description="Off: a forced tool choice turns thinking off for that request."
+							checked={draft.forcedTools}
+							onChange={(v) => set("forcedTools", v)}
+						/>
+						<Toggle
+							label="Thinking always on"
+							description="The model cannot turn thinking off. Effort none sends no thinking field."
+							checked={draft.alwaysThinks}
+							onChange={(v) => set("alwaysThinks", v)}
+						/>
+					</>
 				)}
 				{save.error && <FieldError>{save.error.message}</FieldError>}
 				<DialogFooter className="sm:justify-between">
