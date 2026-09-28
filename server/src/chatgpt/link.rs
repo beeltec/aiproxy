@@ -182,16 +182,24 @@ pub async fn complete_pkce(state: &AppState, flow: &str, session: i64, pasted_ur
     let Some((verifier, expected_state)) = state.link_flows.take_pkce(flow, session) else {
         return failed("This sign-in expired or was already used. Start again.");
     };
-    let result = if returned_state != expected_state {
-        failed("The address belongs to another sign-in. Start again.")
-    } else {
-        match oauth::exchange_code(&state.http, &code, &verifier, oauth::PKCE_REDIRECT).await {
-            Ok(tokens) => finish(state, flow, &tokens).await,
+    if returned_state != expected_state {
+        let result = failed("The address belongs to another sign-in. Start again.");
+        state.link_flows.set(flow, result.clone());
+        return result;
+    }
+    // Own task: a dropped browser request cannot stop the one-time code exchange half-way.
+    let task_state = state.clone();
+    let task_flow = flow.to_owned();
+    tokio::spawn(async move {
+        let result = match oauth::exchange_code(&task_state.http, &code, &verifier, oauth::PKCE_REDIRECT).await {
+            Ok(tokens) => finish(&task_state, &task_flow, &tokens).await,
             Err(err) => failed(&format!("The sign-in failed: {err}")),
-        }
-    };
-    state.link_flows.set(flow, result.clone());
-    result
+        };
+        task_state.link_flows.set(&task_flow, result.clone());
+        result
+    })
+    .await
+    .unwrap_or_else(|_| failed("The sign-in stopped. Start again."))
 }
 
 /// A link flow may save its tokens only while it is open and its admin session exists. The flow

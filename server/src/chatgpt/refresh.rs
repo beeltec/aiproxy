@@ -17,6 +17,7 @@ use crate::state::AppState;
 const FRESH_SECS: i64 = 30;
 /// After a failed refresh, request-time callers do not start a new one for this long.
 const COOLDOWN_SECS: i64 = 60;
+const SAVE_ATTEMPTS: u64 = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKGROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_DELAYS: [Duration; 3] = [
@@ -165,22 +166,35 @@ async fn refresh_now(state: &AppState, account: i64, trigger: Trigger) -> Result
             let refresh = tokens.refresh_token.as_deref().map(|t| enc("refresh_token", t));
             let id_token = tokens.id_token.as_deref().map(|t| enc("id_token", t));
             // Only for the credentials this refresh started with; a re-link in the meantime wins.
-            sqlx::query(
-                "UPDATE chatgpt_accounts SET access_token_enc = ?, refresh_token_enc = COALESCE(?, refresh_token_enc),
-                     id_token_enc = COALESCE(?, id_token_enc), access_expires_at = ?, last_refresh_at = ?,
-                     last_refresh_error = NULL, last_refresh_failed_at = NULL, status = 'active'
-                 WHERE id = ? AND credential_generation = ?",
-            )
-            .bind(access)
-            .bind(refresh)
-            .bind(id_token)
-            .bind(oauth::expires_at(&tokens.access_token))
-            .bind(now)
-            .bind(account)
-            .bind(generation)
-            .execute(&state.db)
-            .await
-            .map_err(db_failure)?;
+            // The old refresh token no longer works, so a failed save is tried again (the lock is
+            // still held) instead of losing the new token.
+            let mut attempt = 0;
+            loop {
+                let saved = sqlx::query(
+                    "UPDATE chatgpt_accounts SET access_token_enc = ?, refresh_token_enc = COALESCE(?, refresh_token_enc),
+                         id_token_enc = COALESCE(?, id_token_enc), access_expires_at = ?, last_refresh_at = ?,
+                         last_refresh_error = NULL, last_refresh_failed_at = NULL, status = 'active'
+                     WHERE id = ? AND credential_generation = ?",
+                )
+                .bind(&access)
+                .bind(&refresh)
+                .bind(&id_token)
+                .bind(oauth::expires_at(&tokens.access_token))
+                .bind(now)
+                .bind(account)
+                .bind(generation)
+                .execute(&state.db)
+                .await;
+                match saved {
+                    Ok(_) => break,
+                    Err(err) if attempt < SAVE_ATTEMPTS => {
+                        attempt += 1;
+                        tracing::warn!(account, error = %err, attempt, "cannot save refreshed tokens, trying again");
+                        tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                    }
+                    Err(err) => return Err(db_failure(err)),
+                }
+            }
             tracing::info!(account, ?trigger, "ChatGPT token refreshed");
             Ok(())
         }
