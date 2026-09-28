@@ -320,20 +320,20 @@ async fn start_pkce_link(current: AdminSession, State(state): State<AppState>) -
     (status = NOT_FOUND, body = ErrorBody),
 ))]
 async fn link_status(
-    _: AdminSession,
+    current: AdminSession,
     State(state): State<AppState>,
     Path(flow): Path<String>,
 ) -> ApiResult<Json<LinkStatus>> {
     let flow = state
         .link_flows
-        .get(&flow)
+        .get(&flow, current.session_id)
         .ok_or_else(|| ApiError::not_found("This sign-in expired. Start again."))?;
     Ok(Json(status_of(flow)))
 }
 
 #[utoipa::path(delete, path = "/chatgpt/link/{flow}", tag = "subscriptions", responses((status = NO_CONTENT)))]
-async fn cancel_link(_: AdminSession, State(state): State<AppState>, Path(flow): Path<String>) -> StatusCode {
-    state.link_flows.cancel(&flow);
+async fn cancel_link(current: AdminSession, State(state): State<AppState>, Path(flow): Path<String>) -> StatusCode {
+    state.link_flows.cancel(&flow, current.session_id);
     StatusCode::NO_CONTENT
 }
 
@@ -341,10 +341,12 @@ async fn cancel_link(_: AdminSession, State(state): State<AppState>, Path(flow):
     (status = OK, body = LinkStatus),
 ))]
 async fn complete_pkce_link(
-    _: AdminSession,
+    current: AdminSession,
     State(state): State<AppState>,
     Path(flow): Path<String>,
     Json(req): Json<PastedCallback>,
 ) -> Json<LinkStatus> {
-    Json(status_of(link::complete_pkce(&state, &flow, &req.url).await))
+    Json(status_of(
+        link::complete_pkce(&state, &flow, current.session_id, &req.url).await,
+    ))
 }

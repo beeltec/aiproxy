@@ -83,7 +83,5 @@ pub async fn run(state: AppState) {
                 });
             }
         }
-        // Do not run the same minute twice.
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
