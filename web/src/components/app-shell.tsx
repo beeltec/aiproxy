@@ -7,6 +7,7 @@ import {
 	ShieldCheckIcon,
 	UsersIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Wordmark } from "#/components/brand";
 import {
 	DropdownMenu,
@@ -14,7 +15,7 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "#/components/ui/dropdown-menu";
-import { api, call } from "#/lib/api/client";
+import { api, call, errorMessage } from "#/lib/api/client";
 import { meQuery } from "#/lib/session";
 
 type NavItem = {
@@ -95,11 +96,12 @@ function AccountMenu({
 	const navigate = useNavigate();
 	const logout = useMutation({
 		mutationFn: () => call(api.POST("/auth/logout")),
-		onSettled: async () => {
+		onSuccess: async () => {
 			queryClient.clear();
 			queryClient.setQueryData(meQuery.queryKey, null);
 			await navigate({ to: "/login" });
 		},
+		onError: (error) => toast.error(errorMessage(error)),
 	});
 
 	return (

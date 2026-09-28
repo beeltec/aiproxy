@@ -24,34 +24,60 @@ pub struct AdminSession {
 }
 
 /// Creates a session and returns the cookie that carries its token.
+///
+/// The insert checks in the same statement that the admin is enabled and still has the verified
+/// password hash. A password reset that runs at the same time therefore cannot leave a session
+/// that was made with the old password. Returns `None` when the check fails.
 pub async fn create(
     db: &SqlitePool,
     admin_id: i64,
+    verified_hash: &str,
     ip: &str,
     user_agent: Option<&str>,
-) -> Result<Cookie<'static>, sqlx::Error> {
+) -> Result<Option<Cookie<'static>>, sqlx::Error> {
     let token = random_token(32);
     let now = now();
     let user_agent = user_agent.map(|ua| ua.chars().take(MAX_USER_AGENT).collect::<String>());
-    sqlx::query(
+    delete_expired(db).await?;
+    let inserted = sqlx::query(
         "INSERT INTO sessions (token_hash, admin_id, created_at, last_seen_at, expires_at, ip, user_agent)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         SELECT ?, id, ?, ?, ?, ?, ? FROM admins WHERE id = ? AND password_hash = ? AND disabled = 0",
     )
     .bind(sha256(token.as_bytes()))
-    .bind(admin_id)
     .bind(now)
     .bind(now)
     .bind(now + ABSOLUTE_TIMEOUT)
     .bind(ip)
     .bind(user_agent)
+    .bind(admin_id)
+    .bind(verified_hash)
     .execute(db)
-    .await?;
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        return Ok(None);
+    }
     sqlx::query("UPDATE admins SET last_login_at = ? WHERE id = ?")
         .bind(now)
         .bind(admin_id)
         .execute(db)
         .await?;
-    Ok(cookie(token))
+    Ok(Some(cookie(token)))
+}
+
+async fn delete_expired(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let now = now();
+    sqlx::query("DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?")
+        .bind(now)
+        .bind(idle_cutoff(now))
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Sessions last seen at or before this time are expired.
+pub fn idle_cutoff(now: i64) -> i64 {
+    now - IDLE_TIMEOUT
 }
 
 fn cookie(token: String) -> Cookie<'static> {

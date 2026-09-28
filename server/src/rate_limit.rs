@@ -2,11 +2,37 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Counts events per key in a sliding time window. Memory is bounded by `MAX_KEYS`.
+/// Counts events per key in a sliding time window. When a key reaches the limit, it stays
+/// blocked for one full window from that moment. Memory is bounded by `MAX_KEYS`.
 pub struct SlidingWindow {
     window: Duration,
     limit: usize,
-    events: Mutex<HashMap<String, VecDeque<Instant>>>,
+    entries: Mutex<HashMap<String, Entry>>,
+}
+
+#[derive(Default)]
+struct Entry {
+    events: VecDeque<Instant>,
+    blocked_since: Option<Instant>,
+}
+
+impl Entry {
+    fn prune(&mut self, now: Instant, window: Duration) {
+        while self.events.front().is_some_and(|t| now.duration_since(*t) >= window) {
+            self.events.pop_front();
+        }
+        if self.blocked_since.is_some_and(|t| now.duration_since(t) >= window) {
+            self.blocked_since = None;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.blocked_since.is_none()
+    }
+
+    fn last_seen(&self) -> Option<Instant> {
+        self.events.back().copied().max(self.blocked_since)
+    }
 }
 
 const MAX_KEYS: usize = 10_000;
@@ -16,55 +42,56 @@ impl SlidingWindow {
         Self {
             window,
             limit,
-            events: Mutex::new(HashMap::new()),
+            entries: Mutex::new(HashMap::new()),
         }
     }
 
-    /// True when the key has reached the limit in the current window.
+    /// True when the key is blocked.
     pub fn is_full(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut events = self.events.lock().expect("rate limit lock");
-        events.get_mut(key).is_some_and(|list| {
-            prune(list, now, self.window);
-            list.len() >= self.limit
+        let mut entries = self.entries.lock().expect("rate limit lock");
+        entries.get_mut(key).is_some_and(|entry| {
+            entry.prune(now, self.window);
+            entry.blocked_since.is_some()
         })
     }
 
-    /// Records an event. Returns false (and records nothing) when the limit is already reached.
+    /// Records an event. Returns false (and records nothing) when the key is blocked.
     pub fn try_record(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut events = self.events.lock().expect("rate limit lock");
-        if !events.contains_key(key) && events.len() >= MAX_KEYS {
-            events.retain(|_, list| {
-                prune(list, now, self.window);
-                !list.is_empty()
-            });
-            if events.len() >= MAX_KEYS {
-                let oldest = events
-                    .iter()
-                    .min_by_key(|(_, list)| list.back().copied())
-                    .map(|(key, _)| key.clone());
-                if let Some(oldest) = oldest {
-                    events.remove(&oldest);
-                }
-            }
+        let mut entries = self.entries.lock().expect("rate limit lock");
+        if !entries.contains_key(key) && entries.len() >= MAX_KEYS {
+            self.make_room(&mut entries, now);
         }
-        let list = events.entry(key.to_owned()).or_default();
-        prune(list, now, self.window);
-        if list.len() >= self.limit {
+        let entry = entries.entry(key.to_owned()).or_default();
+        entry.prune(now, self.window);
+        if entry.blocked_since.is_some() {
             return false;
         }
-        list.push_back(now);
+        entry.events.push_back(now);
+        if entry.events.len() >= self.limit {
+            entry.blocked_since = Some(now);
+        }
         true
     }
 
     pub fn clear(&self, key: &str) {
-        self.events.lock().expect("rate limit lock").remove(key);
+        self.entries.lock().expect("rate limit lock").remove(key);
     }
-}
 
-fn prune(list: &mut VecDeque<Instant>, now: Instant, window: Duration) {
-    while list.front().is_some_and(|t| now.duration_since(*t) >= window) {
-        list.pop_front();
+    fn make_room(&self, entries: &mut HashMap<String, Entry>, now: Instant) {
+        entries.retain(|_, entry| {
+            entry.prune(now, self.window);
+            !entry.is_empty()
+        });
+        if entries.len() >= MAX_KEYS {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen())
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
     }
 }

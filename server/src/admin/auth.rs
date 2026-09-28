@@ -102,6 +102,7 @@ async fn setup(
     validate_username(&req.username)?;
     validate_password(&req.password)?;
     let password_hash = state.hasher.hash(req.password).await?;
+    let hash_for_session = password_hash.clone();
 
     let forbidden = || {
         ApiError::new(
@@ -131,7 +132,9 @@ async fn setup(
     tx.commit().await?;
 
     tracing::info!(username = %req.username, "first admin created");
-    let cookie = session::create(&state.db, admin_id, &ip, user_agent(&headers)).await?;
+    let cookie = session::create(&state.db, admin_id, &hash_for_session, &ip, user_agent(&headers))
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     Ok((
         jar.add(cookie),
         Json(Me {
@@ -157,12 +160,24 @@ async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<(CookieJar, Json<Me>)> {
-    let ip_key = format!("ip:{ip}");
-    let user_key = format!("user:{}", req.username.to_lowercase());
+    let invalid = || {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "The username or password is not correct.",
+        )
+    };
     let limits = &state.login;
     if !limits.attempts.try_record(&ip.to_string()) {
         return Err(ApiError::too_many_requests("Too many attempts. Wait a minute."));
     }
+    let ip_key = format!("ip:{ip}");
+    // Such a username cannot exist. The check also keeps long strings out of the limiter.
+    if validate_username(&req.username).is_err() {
+        limits.failures.try_record(&ip_key);
+        return Err(invalid());
+    }
+    let user_key = format!("user:{}", req.username.to_lowercase());
     if limits.failures.is_full(&ip_key) || limits.failures.is_full(&user_key) {
         return Err(ApiError::too_many_requests("Too many failed logins. Wait 15 minutes."));
     }
@@ -174,19 +189,22 @@ async fn login(
             .await?;
     let hash = admin.as_ref().map(|(_, _, hash)| hash.clone());
     let valid = state.hasher.verify(hash, req.password).await?;
-    let Some((admin_id, username, _)) = admin.filter(|_| valid) else {
+    let session = match admin.filter(|_| valid) {
+        Some((admin_id, username, hash)) => {
+            session::create(&state.db, admin_id, &hash, &ip.to_string(), user_agent(&headers))
+                .await?
+                .map(|cookie| (cookie, Me { id: admin_id, username }))
+        }
+        None => None,
+    };
+    let Some((cookie, me)) = session else {
         limits.failures.try_record(&ip_key);
         limits.failures.try_record(&user_key);
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_credentials",
-            "The username or password is not correct.",
-        ));
+        return Err(invalid());
     };
 
     limits.failures.clear(&user_key);
-    let cookie = session::create(&state.db, admin_id, &ip.to_string(), user_agent(&headers)).await?;
-    Ok((jar.add(cookie), Json(Me { id: admin_id, username })))
+    Ok((jar.add(cookie), Json(me)))
 }
 
 #[utoipa::path(post, path = "/auth/logout", tag = "auth", responses((status = NO_CONTENT)))]

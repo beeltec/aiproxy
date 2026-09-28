@@ -8,6 +8,7 @@ use utoipa_axum::routes;
 
 use super::admins::validate_password;
 use super::session::{self, AdminSession};
+use crate::db::now;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::state::AppState;
 
@@ -71,11 +72,14 @@ async fn change_password(
 
 #[utoipa::path(get, path = "/account/sessions", tag = "account", responses((status = OK, body = Vec<SessionView>)))]
 async fn list_sessions(current: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<SessionView>>> {
+    let now = now();
     let mut sessions: Vec<SessionView> = sqlx::query_as(
         "SELECT id, created_at, last_seen_at, expires_at, ip, user_agent FROM sessions
-         WHERE admin_id = ? ORDER BY last_seen_at DESC",
+         WHERE admin_id = ? AND expires_at > ? AND last_seen_at > ? ORDER BY last_seen_at DESC",
     )
     .bind(current.admin_id)
+    .bind(now)
+    .bind(session::idle_cutoff(now))
     .fetch_all(&state.db)
     .await?;
     for s in &mut sessions {
