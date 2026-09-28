@@ -33,6 +33,8 @@ impl Reason {
 #[derive(Default)]
 pub struct RejectedCounter {
     counts: Mutex<HashMap<(i64, Reason), i64>>,
+    /// One flush at a time, so the last flush at shutdown waits for a running one.
+    flushing: tokio::sync::Mutex<()>,
 }
 
 impl RejectedCounter {
@@ -47,6 +49,7 @@ impl RejectedCounter {
     }
 
     pub async fn flush(&self, db: &SqlitePool) {
+        let _flushing = self.flushing.lock().await;
         let counts = std::mem::take(&mut *self.counts.lock().expect("rejected lock"));
         for ((hour, reason), count) in counts {
             let result = sqlx::query(
