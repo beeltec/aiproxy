@@ -6,8 +6,10 @@ import {
 	GaugeIcon,
 	KeyRoundIcon,
 	LogOutIcon,
+	PlugIcon,
 	SettingsIcon,
 	ShieldCheckIcon,
+	TagIcon,
 	UsersIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -25,6 +27,8 @@ type NavItem = {
 	to:
 		| "/"
 		| "/api-keys"
+		| "/connections"
+		| "/aliases"
 		| "/subscriptions"
 		| "/admins"
 		| "/settings"
@@ -42,6 +46,8 @@ const NAV: { group: string; items: NavItem[] }[] = [
 		group: "Gateway",
 		items: [
 			{ to: "/subscriptions", label: "Subscriptions", icon: BadgeCheckIcon },
+			{ to: "/connections", label: "Connections", icon: PlugIcon },
+			{ to: "/aliases", label: "Aliases", icon: TagIcon },
 			{ to: "/api-keys", label: "API keys", icon: KeyRoundIcon },
 		],
 	},

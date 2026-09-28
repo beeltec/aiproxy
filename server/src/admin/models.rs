@@ -33,15 +33,15 @@ pub struct ModelView {
     enabled: bool,
     /// The synced capabilities.
     #[sqlx(json)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = Capabilities)]
     capabilities: Value,
     /// Admin changes. They win over the synced capabilities.
     #[sqlx(json)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = CapabilityOverrides)]
     capability_overrides: Value,
     /// The capabilities that the gateway uses.
     #[sqlx(skip)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = Capabilities)]
     effective: Value,
     last_seen_at: i64,
 }
@@ -73,43 +73,82 @@ async fn list_models(_: AdminSession, State(state): State<AppState>) -> ApiResul
     Ok(Json(models.into_iter().map(with_effective).collect()))
 }
 
+/// What a model can do. Every key is optional; a missing key means "unknown". The keys are
+/// described in `connections::models`.
+#[derive(Serialize, ToSchema)]
+pub struct Capabilities {
+    input: Option<Vec<String>>,
+    efforts: Option<Vec<String>>,
+    default_effort: Option<String>,
+    fast: Option<bool>,
+    context_window: Option<i64>,
+    max_output: Option<i64>,
+    endpoints: Option<Vec<String>>,
+    chat_tools: Option<bool>,
+    mode: Option<String>,
+    thinking: Option<Thinking>,
+    forced_tools_with_thinking: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Thinking {
+    adaptive: bool,
+    enabled: bool,
+}
+
+/// The capabilities that an admin can change.
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    efforts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Thinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forced_tools_with_thinking: Option<bool>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct ModelUpdate {
     enabled: bool,
-    /// Capability keys to change. An empty object removes all changes.
-    #[schema(value_type = Object)]
-    capability_overrides: Value,
+    /// Capabilities to change. An empty object removes all changes.
+    capability_overrides: CapabilityOverrides,
 }
 
 const INPUT_KINDS: [&str; 5] = ["text", "image", "file", "audio", "video"];
 const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
-/// Only known keys with the right type are accepted.
-fn check_overrides(overrides: &Value) -> Result<(), String> {
-    let Some(map) = overrides.as_object() else {
-        return Err("The capability changes must be an object.".into());
-    };
-    let list_of = |value: &Value, allowed: &[&str]| {
-        value
-            .as_array()
-            .is_some_and(|list| list.iter().all(|v| v.as_str().is_some_and(|v| allowed.contains(&v))))
-    };
-    for (key, value) in map {
-        let valid = match key.as_str() {
-            "input" => list_of(value, &INPUT_KINDS),
-            "efforts" => list_of(value, &EFFORTS),
-            "endpoints" => list_of(value, &["chat", "responses"]),
-            "fast" | "chat_tools" | "forced_tools_with_thinking" => value.is_boolean(),
-            "context_window" | "max_output" => value.as_i64().is_some_and(|v| v > 0),
-            "thinking" => value.as_object().is_some_and(|t| {
-                t.iter()
-                    .all(|(k, v)| matches!(k.as_str(), "adaptive" | "enabled") && v.is_boolean())
-            }),
-            _ => return Err(format!("`{key}` is not a capability that can be changed.")),
-        };
-        if !valid {
-            return Err(format!("The value of `{key}` is not valid."));
-        }
+fn check_overrides(overrides: &CapabilityOverrides) -> Result<(), String> {
+    let known =
+        |list: &Option<Vec<String>>, allowed: &[&str]| list.iter().flatten().all(|v| allowed.contains(&v.as_str()));
+    if !known(&overrides.input, &INPUT_KINDS) {
+        return Err("The input kinds must be text, image, file, audio or video.".into());
+    }
+    if !known(&overrides.efforts, &EFFORTS) {
+        return Err(format!("The efforts must be from: {}.", EFFORTS.join(", ")));
+    }
+    if !known(&overrides.endpoints, &["chat", "responses"]) {
+        return Err("The endpoints must be chat or responses.".into());
+    }
+    if [overrides.context_window, overrides.max_output]
+        .iter()
+        .flatten()
+        .any(|v| *v < 1)
+    {
+        return Err("Token limits must be at least 1.".into());
     }
     Ok(())
 }
@@ -126,9 +165,10 @@ async fn update_model(
     Json(req): Json<ModelUpdate>,
 ) -> ApiResult<Json<ModelView>> {
     check_overrides(&req.capability_overrides).map_err(ApiError::bad_request)?;
+    let overrides = serde_json::to_string(&req.capability_overrides).map_err(|_| ApiError::internal())?;
     let updated = sqlx::query("UPDATE models SET enabled = ?, capability_overrides = ? WHERE id = ?")
         .bind(req.enabled)
-        .bind(req.capability_overrides.to_string())
+        .bind(overrides)
         .bind(id)
         .execute(&state.db)
         .await?

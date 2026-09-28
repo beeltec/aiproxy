@@ -81,6 +81,7 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
             "efforts": efforts,
             "default_effort": model.default_reasoning_level,
             "service_tiers": tiers,
+            "fast": tiers.iter().any(|tier| matches!(*tier, "priority" | "fast")),
             "context_window": model.context_window,
             "visibility": model.visibility,
         });

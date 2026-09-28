@@ -234,6 +234,38 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/aliases": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_aliases"];
+		put?: never;
+		post: operations["create_alias"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/aliases/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put: operations["update_alias"];
+		post?: never;
+		delete: operations["delete_alias"];
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/api-keys": {
 		parameters: {
 			query?: never;
@@ -589,6 +621,88 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/connections": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_connections"];
+		put?: never;
+		post: operations["create_connection"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/connections/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post?: never;
+		/** Deletes the connection and its models. Aliases that point to it stop working. */
+		delete: operations["delete_connection"];
+		options?: never;
+		head?: never;
+		patch: operations["update_connection"];
+		trace?: never;
+	};
+	"/connections/{id}/sync": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/** Loads the model list again. New models start disabled. */
+		post: operations["sync_connection"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/models": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_models"];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/models/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put: operations["update_model"];
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/settings": {
 		parameters: {
 			query?: never;
@@ -721,6 +835,30 @@ export interface components {
 			second_factor: boolean;
 			username: string;
 		};
+		AliasSettings: {
+			default_effort?: string | null;
+			default_fast?: boolean;
+			default_summary?: string | null;
+			description?: string | null;
+			name: string;
+			target: string;
+		};
+		AliasView: {
+			/** Format: int64 */
+			created_at: number;
+			default_effort?: string | null;
+			default_fast: boolean;
+			/** @description `auto`, `concise` or `detailed`. */
+			default_summary?: string | null;
+			description?: string | null;
+			/** Format: int64 */
+			id: number;
+			name: string;
+			/** @description `chatgpt/<model>` or `<connection slug>/<model>`. */
+			target: string;
+			/** @description False when the target model is missing or disabled: the alias does not work then. */
+			target_enabled: boolean;
+		};
 		ApiKeyView: {
 			allowlist: string[];
 			/**
@@ -750,12 +888,73 @@ export interface components {
 			ceremony: string;
 			credential: unknown;
 		};
+		/**
+		 * @description What a model can do. Every key is optional; a missing key means "unknown". The keys are
+		 *     described in `connections::models`.
+		 */
+		Capabilities: {
+			chat_tools?: boolean | null;
+			/** Format: int64 */
+			context_window?: number | null;
+			default_effort?: string | null;
+			efforts?: string[] | null;
+			endpoints?: string[] | null;
+			fast?: boolean | null;
+			forced_tools_with_thinking?: boolean | null;
+			input?: string[] | null;
+			/** Format: int64 */
+			max_output?: number | null;
+			mode?: string | null;
+			thinking?: components["schemas"]["Thinking"] | null;
+		};
+		/** @description The capabilities that an admin can change. */
+		CapabilityOverrides: {
+			chat_tools?: boolean | null;
+			/** Format: int64 */
+			context_window?: number | null;
+			efforts?: string[] | null;
+			endpoints?: string[] | null;
+			fast?: boolean | null;
+			forced_tools_with_thinking?: boolean | null;
+			input?: string[] | null;
+			/** Format: int64 */
+			max_output?: number | null;
+			thinking?: components["schemas"]["Thinking"] | null;
+		};
 		ChangePassword: {
 			current_password: string;
 			new_password: string;
 		};
 		CodeRequest: {
 			code: string;
+		};
+		ConnectionUpdate: {
+			/** @description A new key. Empty or missing: keep the key. */
+			api_key?: string | null;
+			base_url?: string | null;
+			display_name: string;
+		};
+		ConnectionView: {
+			/** @description The last 4 characters of the API key. */
+			api_key_last4: string;
+			base_url?: string | null;
+			/** Format: int64 */
+			created_at: number;
+			display_name: string;
+			/** Format: int64 */
+			enabled_models: number;
+			/** Format: int64 */
+			id: number;
+			/** @description `openai`, `anthropic` or `openrouter`. */
+			kind: string;
+			/** @description The error of the last model list request. */
+			last_error?: string | null;
+			/** Format: int64 */
+			last_sync_at?: number | null;
+			/** Format: int64 */
+			models: number;
+			/** @description The model prefix, for example `anthropic-main` in `anthropic-main/claude-opus-5-5`. */
+			slug: string;
 		};
 		CreateAdmin: {
 			password: string;
@@ -850,6 +1049,42 @@ export interface components {
 			recovery_code: boolean;
 			totp: boolean;
 		};
+		ModelUpdate: {
+			/** @description Capabilities to change. An empty object removes all changes. */
+			capability_overrides: components["schemas"]["CapabilityOverrides"];
+			enabled: boolean;
+		};
+		ModelView: {
+			/** @description The synced capabilities. */
+			capabilities: components["schemas"]["Capabilities"];
+			/** @description Admin changes. They win over the synced capabilities. */
+			capability_overrides: components["schemas"]["CapabilityOverrides"];
+			display_name?: string | null;
+			/** @description The capabilities that the gateway uses. */
+			effective: components["schemas"]["Capabilities"];
+			enabled: boolean;
+			/** Format: int64 */
+			id: number;
+			/** Format: int64 */
+			last_seen_at: number;
+			/** @description The name for clients, for example `chatgpt/gpt-5.5` or `or/openai/gpt-5.5`. */
+			name: string;
+			/** @description `chatgpt`, or the slug of the connection. */
+			source: string;
+			/** @description `chatgpt`, `openai`, `anthropic` or `openrouter`. */
+			source_kind: string;
+			upstream_id: string;
+		};
+		NewConnection: {
+			api_key: string;
+			/** @description Optional, for example a compatible gateway. Default: the official API. */
+			base_url?: string | null;
+			display_name: string;
+			/** @description `openai`, `anthropic` or `openrouter`. */
+			kind: string;
+			/** @description Lower-case letters, digits and `-`. It cannot change later. */
+			slug: string;
+		};
 		/** @description WebAuthn options and credentials are passed through as JSON objects. */
 		Options: {
 			/** @description Id of this ceremony, to send back with the answer. */
@@ -919,6 +1154,10 @@ export interface components {
 		SetupStatus: {
 			/** @description True when no admin exists yet. */
 			required: boolean;
+		};
+		Thinking: {
+			adaptive: boolean;
+			enabled: boolean;
 		};
 		TotpSetup: {
 			otpauth_url: string;
@@ -1377,6 +1616,132 @@ export interface operations {
 		};
 	};
 	reset_factors: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	list_aliases: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AliasView"][];
+				};
+			};
+		};
+	};
+	create_alias: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["AliasSettings"];
+			};
+		};
+		responses: {
+			201: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AliasView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	update_alias: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["AliasSettings"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AliasView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	delete_alias: {
 		parameters: {
 			query?: never;
 			header?: never;
@@ -2105,6 +2470,229 @@ export interface operations {
 				};
 				content: {
 					"application/json": components["schemas"]["LinkStatus"];
+				};
+			};
+		};
+	};
+	list_connections: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ConnectionView"][];
+				};
+			};
+		};
+	};
+	create_connection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["NewConnection"];
+			};
+		};
+		responses: {
+			201: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ConnectionView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	delete_connection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	update_connection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["ConnectionUpdate"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ConnectionView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	sync_connection: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ConnectionView"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	list_models: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ModelView"][];
+				};
+			};
+		};
+	};
+	update_model: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["ModelUpdate"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ModelView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
 				};
 			};
 		};
