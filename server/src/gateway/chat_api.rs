@@ -70,7 +70,14 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
                 }
                 let text = text_of(&message["content"]);
                 let tool_calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
-                if let Some(refusal) = message["refusal"].as_str().filter(|r| !r.is_empty()) {
+                // A refusal can be a field of the message or a part of its content.
+                let content_refusals = message["content"].as_array().into_iter().flatten();
+                let refusals = message["refusal"]
+                    .as_str()
+                    .into_iter()
+                    .chain(content_refusals.filter_map(|p| p["refusal"].as_str()))
+                    .filter(|r| !r.is_empty());
+                for refusal in refusals {
                     input.push(json!({
                         "type": "message", "role": "assistant",
                         "content": [{ "type": "refusal", "refusal": refusal }],

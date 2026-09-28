@@ -531,6 +531,17 @@ fn citation(annotation: &Value, text: Option<&str>) -> Option<Value> {
     }))
 }
 
+/// The Anthropic search tool has only a query, so opening or searching a page becomes a query
+/// text that keeps the URL.
+fn search_query(action: &Value) -> String {
+    let url = action["url"].as_str().unwrap_or_default();
+    match action["type"].as_str().unwrap_or_default() {
+        "open_page" => format!("open {url}"),
+        "find_in_page" => format!("find \"{}\" in {url}", action["pattern"].as_str().unwrap_or_default()),
+        _ => action["query"].as_str().unwrap_or_default().to_owned(),
+    }
+}
+
 /// Web search as the Anthropic server tool blocks.
 fn web_search_blocks(item: &Value) -> [Value; 2] {
     let id = format!("srvtoolu_{}", item["id"].as_str().unwrap_or_default());
@@ -545,7 +556,7 @@ fn web_search_blocks(item: &Value) -> [Value; 2] {
         })
         .collect();
     [
-        json!({ "type": "server_tool_use", "id": id, "name": "web_search", "input": { "query": item["action"]["query"] } }),
+        json!({ "type": "server_tool_use", "id": id, "name": "web_search", "input": { "query": search_query(&item["action"]) } }),
         json!({ "type": "web_search_tool_result", "tool_use_id": id, "content": results }),
     ]
 }
