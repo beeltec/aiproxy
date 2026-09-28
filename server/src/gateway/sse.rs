@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{HeaderValue, header};
@@ -17,6 +17,7 @@ use super::engine::Msg;
 const PING_AFTER: Duration = Duration::from_secs(15);
 /// A client that takes no data for this long has stopped reading.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const QUEUE: usize = 64;
 
 /// Turns engine messages into client SSE bytes. `encode` returns the bytes for one message;
 /// `ping` is sent after silence. A stalled client loses its concurrency slots.
@@ -26,13 +27,20 @@ pub fn response(
     ping: &'static str,
     admission: Admission,
 ) -> Response {
-    let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
-    // Shared, so that a stalled response can drop its queued frames.
+    let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(QUEUE);
+    // The body owns the queue. The task has only a weak link, so a dropped body closes the
+    // queue, and a stalled body can lose its queued frames.
     let queue = Arc::new(Mutex::new(Some(body_rx)));
-    let stalled = queue.clone();
+    let link = Arc::downgrade(&queue);
     tokio::spawn(async move {
+        let stall = || {
+            if let Some(queue) = link.upgrade() {
+                queue.lock().expect("queue lock").take();
+            }
+            admission.release();
+        };
         loop {
-            // Dropping `rx` when the client is gone tells the engine to stop.
+            // A closed queue tells the engine to stop, because `rx` is dropped.
             let next = tokio::select! {
                 () = tx.closed() => return,
                 next = tokio::time::timeout(PING_AFTER, rx.recv()) => next,
@@ -46,12 +54,23 @@ pub fn response(
                 match tokio::time::timeout(WRITE_TIMEOUT, tx.send(Ok(chunk))).await {
                     Ok(Ok(())) => {}
                     Ok(Err(_)) => return,
-                    Err(_) => {
-                        stalled.lock().expect("queue lock").take();
-                        admission.release();
-                        return;
-                    }
+                    Err(_) => return stall(),
                 }
+            }
+        }
+        // The last frames must also leave the queue in time.
+        let mut free = tx.capacity();
+        let mut progress = Instant::now();
+        while tx.capacity() < QUEUE {
+            tokio::select! {
+                () = tx.closed() => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            if tx.capacity() != free {
+                free = tx.capacity();
+                progress = Instant::now();
+            } else if progress.elapsed() > WRITE_TIMEOUT {
+                return stall();
             }
         }
     });
