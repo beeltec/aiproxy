@@ -6,6 +6,7 @@ import {
 	Outlet,
 	Scripts,
 } from "@tanstack/react-router";
+import { Toaster } from "#/components/ui/sonner";
 import appCss from "../styles.css?url";
 
 interface RouterContext {
@@ -30,6 +31,7 @@ function RootComponent() {
 	return (
 		<QueryClientProvider client={queryClient}>
 			<Outlet />
+			<Toaster position="bottom-right" />
 		</QueryClientProvider>
 	);
 }
