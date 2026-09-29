@@ -61,7 +61,7 @@ import {
 	recomputeQuery,
 	SOURCE_NAMES,
 } from "#/lib/pricing";
-import { formatCount } from "#/lib/stats";
+import { formatCount, localDate } from "#/lib/stats";
 import { cn } from "#/lib/utils";
 
 export const Route = createFileRoute("/_app/pricing")({
@@ -469,7 +469,8 @@ function OverrideForm({
 			const standard = { ...base.standard };
 			for (const f of TOKEN_FIELDS)
 				standard[f.key] = fromField(value[f.key], 1e6);
-			const prices: Prices = { ...base, standard };
+			// An override has fixed prices, also when it copies a variable price.
+			const prices: Prices = { ...base, standard, variable: false };
 			for (const f of UNIT_FIELDS)
 				prices[f.key] = fromField(value[f.key], f.scale);
 			if (editing.kind === "edit") {
@@ -510,8 +511,10 @@ function OverrideForm({
 		validators: { onSubmit: overrideSchema },
 		onSubmit: ({ value }) => save.mutateAsync(value).catch(() => undefined),
 	});
+	// The rules of the copied price that the form does not show (and keeps).
 	const kept = extras({
 		...base,
+		variable: false,
 		web_search: null,
 		web_search_preview: null,
 		per_character: null,
@@ -687,24 +690,22 @@ function DeleteOverride({
 	);
 }
 
-/** The local date of unix seconds, as the value of a date input. */
-function dateValue(seconds: number): string {
-	const date = new Date(seconds * 1000);
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
 function Recompute() {
 	const queryClient = useQueryClient();
 	const { data: status } = useQuery(recomputeQuery);
 	const today = Math.floor(Date.now() / 1000);
-	const [from, setFrom] = useState(dateValue(today - 29 * 86_400));
-	const [to, setTo] = useState(dateValue(today));
+	const [from, setFrom] = useState(
+		localDate(new Date((today - 29 * 86_400) * 1000)),
+	);
+	const [to, setTo] = useState(localDate(new Date(today * 1000)));
 	const start = useMutation({
 		mutationFn: () => {
 			// Local midnights; the end date is included.
 			const begin = new Date(`${from}T00:00`).getTime() / 1000;
-			const end = new Date(`${to}T00:00`).getTime() / 1000 + 86_400;
+			// The next local midnight, also on a day with a clock change.
+			const next = new Date(`${to}T00:00`);
+			next.setDate(next.getDate() + 1);
+			const end = next.getTime() / 1000;
 			return call(
 				api.POST("/pricing/recompute", { body: { from: begin, to: end } }),
 			);

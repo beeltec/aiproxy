@@ -3,6 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { FilterIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 import { PageHeader } from "#/components/page-header";
+import { RangePicker } from "#/components/range-picker";
 import { Segmented } from "#/components/segmented";
 import { StripChart } from "#/components/strip-chart";
 import { Button } from "#/components/ui/button";
@@ -32,8 +33,7 @@ import {
 	GROUPS,
 	METRICS,
 	type MetricKey,
-	RANGES,
-	type RangeKey,
+	type Range,
 	rangeSearch,
 	type StatsTotals,
 	statsQuery,
@@ -48,7 +48,8 @@ type Filters = { keys: number[]; models: string[]; upstreams: string[] };
 const NO_FILTERS: Filters = { keys: [], models: [], upstreams: [] };
 
 function UsagePage() {
-	const { range, group } = Route.useSearch();
+	const { range: preset, from, to, group } = Route.useSearch();
+	const range = { range: preset, from, to };
 	const navigate = useNavigate({ from: Route.fullPath });
 	const [metric, setMetric] = useState<MetricKey>("cost");
 	const [filters, setFilters] = useState<Filters>(NO_FILTERS);
@@ -62,12 +63,17 @@ function UsagePage() {
 				title="Usage"
 				description="Requests, tokens and their API value, split by model, API key or upstream."
 				actions={
-					<Segmented
-						label="Time range"
-						options={RANGES}
+					<RangePicker
 						value={range}
 						onChange={(next) =>
-							navigate({ search: (s) => ({ ...s, range: next }) })
+							navigate({
+								search: (s) => ({
+									...s,
+									from: undefined,
+									to: undefined,
+									...next,
+								}),
+							})
 						}
 					/>
 				}
@@ -260,7 +266,7 @@ function FilterMenu({
 	filters,
 	onChange,
 }: {
-	range: RangeKey;
+	range: Range;
 	filters: Filters;
 	onChange: (filters: Filters) => void;
 }) {

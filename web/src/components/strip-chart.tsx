@@ -61,10 +61,15 @@ function bucketLabel(start: number, bucket: string, long = false): string {
 			: bucket === "month"
 				? { month: "short", year: "numeric" }
 				: { day: "numeric", month: "short" };
-	const label = new Intl.DateTimeFormat("en-GB", {
-		...options,
-		timeZone: TIME_ZONE,
-	}).format(start * 1000);
+	const format = (o: Intl.DateTimeFormatOptions) =>
+		new Intl.DateTimeFormat("en-GB", { ...o, timeZone: TIME_ZONE }).format(
+			start * 1000,
+		);
+	const label = format(options);
+	// An hour axis shows the date at midnight, so the days are clear.
+	if (bucket === "hour" && !long && label === "00:00") {
+		return format({ day: "numeric", month: "short" });
+	}
 	return bucket === "week" && long ? `Week of ${label}` : label;
 }
 
@@ -148,12 +153,21 @@ export function StripChart({
 					/>
 				)}
 			</div>
-			<div className="flex justify-between gap-2 px-2 font-mono text-[0.625rem] text-muted-foreground">
-				{stats.buckets
-					.filter((_, i) => i % every === 0)
-					.map((start) => (
-						<span key={start}>{bucketLabel(start, stats.bucket)}</span>
-					))}
+			{/* Each label stands under the middle of its bar (the bars have the same width). */}
+			<div className="relative mx-2 h-3 font-mono text-[0.625rem] text-muted-foreground">
+				{stats.buckets.map((start, index) =>
+					index % every === 0 ? (
+						<span
+							key={start}
+							className="absolute top-0 -translate-x-1/2 whitespace-nowrap"
+							style={{
+								left: `${((index + 0.5) / stats.buckets.length) * 100}%`,
+							}}
+						>
+							{bucketLabel(start, stats.bucket)}
+						</span>
+					) : null,
+				)}
 			</div>
 			{lines.length > 0 && (
 				<figcaption className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">

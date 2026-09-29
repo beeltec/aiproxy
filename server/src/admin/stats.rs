@@ -128,14 +128,24 @@ fn buckets(from: i64, to: i64, tz: Tz, size: &str) -> Vec<i64> {
         }
         fits
     };
-    // Hours step in real time from the local hour, so a repeated hour at a clock change is its
-    // own bucket.
+    // An hour bucket starts at each local full hour. The candidates step a quarter hour in
+    // real time, so a repeated hour at a clock change is its own bucket, and a clock change of
+    // 30 minutes keeps the local borders.
     if size == "hour" {
-        let mut at = local(tz, date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start)) + 3600;
-        while push(at) {
-            at += 3600;
+        let mut at = local(tz, date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start));
+        loop {
+            at += 900;
+            let full_hour = tz
+                .timestamp_opt(at, 0)
+                .single()
+                .is_some_and(|t| t.minute() == 0 && t.second() == 0);
+            if full_hour && !push(at) {
+                return out;
+            }
+            if at >= to {
+                return out;
+            }
         }
-        return out;
     }
     let mut current = match size {
         "day" => midnight(date),

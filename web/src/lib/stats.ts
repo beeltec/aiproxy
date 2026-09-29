@@ -9,13 +9,13 @@ export type StatsGroup = Schemas["StatsGroup"];
 
 /** A stats request with a range preset in place of the times. */
 export type StatsParams = Omit<StatsRequest, "from" | "to" | "time_zone"> & {
-	range: RangeKey;
+	range: Range;
 };
 
 /** The times of the range are computed at each load, so a refresh shows new usage. */
 export const statsQuery = ({ range, ...params }: StatsParams) =>
 	queryOptions({
-		queryKey: ["stats", range, params],
+		queryKey: ["stats", range.range, range.from, range.to, params],
 		queryFn: () => {
 			const [from, to] = rangeBounds(range);
 			return call(
@@ -27,6 +27,28 @@ export const statsQuery = ({ range, ...params }: StatsParams) =>
 		refetchInterval: 60_000,
 	});
 
+const day = new Intl.DateTimeFormat("en-GB", {
+	day: "numeric",
+	month: "short",
+	year: "numeric",
+});
+
+/** The name of a range, for example "7 days" or "1 Sept 2026 – 29 Sept 2026". */
+export function rangeName(range: Range): string {
+	if (range.range !== "custom" || !range.from || !range.to)
+		return RANGES[range.range];
+	const name = (date: string) => day.format(new Date(`${date}T00:00`));
+	return range.from === range.to
+		? name(range.from)
+		: `${name(range.from)} – ${name(range.to)}`;
+}
+
+/** A local date as `YYYY-MM-DD`. */
+export function localDate(date: Date): string {
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 /** The browser time zone: range presets and buckets use it. */
 export const TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -36,8 +58,12 @@ export const RANGES = {
 	"30d": "30 days",
 	"90d": "90 days",
 	month: "This month",
+	custom: "Dates",
 } as const;
 export type RangeKey = keyof typeof RANGES;
+
+/** A preset, or `custom` with local dates (`YYYY-MM-DD`, both included). */
+export type Range = { range: RangeKey; from?: string; to?: string };
 
 export const GROUPS = {
 	model: "Model",
@@ -48,8 +74,19 @@ export const GROUPS = {
 export type GroupKey = keyof typeof GROUPS;
 
 /** Search parameters of the Overview and Usage pages. */
+const date = z
+	.string()
+	.regex(/^\d{4}-\d{2}-\d{2}$/)
+	.optional()
+	.catch(undefined);
+
 export const rangeSearch = z.object({
-	range: z.enum(["24h", "7d", "30d", "90d", "month"]).default("7d").catch("7d"),
+	range: z
+		.enum(["24h", "7d", "30d", "90d", "month", "custom"])
+		.default("7d")
+		.catch("7d"),
+	from: date,
+	to: date,
 	group: z
 		.enum(["model", "key", "upstream", "none"])
 		.default("model")
@@ -61,15 +98,25 @@ export const rangeSearch = z.object({
  * midnight, so the first bucket is a whole day.
  */
 export function rangeBounds(
-	range: RangeKey,
+	{ range, from, to: until }: Range,
 	now = new Date(),
 ): [number, number] {
+	if (range === "custom" && from && until) {
+		const start = new Date(`${from}T00:00`);
+		// The day after the last date, also on a day with a clock change.
+		const end = new Date(`${until}T00:00`);
+		end.setDate(end.getDate() + 1);
+		return [
+			Math.floor(start.getTime() / 1000),
+			Math.floor(end.getTime() / 1000),
+		];
+	}
 	const to = Math.ceil(now.getTime() / 1000);
 	if (range === "24h") return [to - 86_400, to];
 	const start = new Date(now);
 	start.setHours(0, 0, 0, 0);
 	if (range === "month") start.setDate(1);
-	else start.setDate(start.getDate() - (Number.parseInt(range, 10) - 1));
+	else start.setDate(start.getDate() - (Number.parseInt(range, 10) || 7) + 1);
 	return [Math.floor(start.getTime() / 1000), to];
 }
 

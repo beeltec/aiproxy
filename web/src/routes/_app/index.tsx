@@ -5,9 +5,11 @@ import { GaugeMark } from "#/components/brand";
 import { MeterRegister } from "#/components/meter-register";
 import { PageHeader } from "#/components/page-header";
 import { QuotaMeters } from "#/components/quota-meters";
+import { RangePicker } from "#/components/range-picker";
 import { Segmented } from "#/components/segmented";
 import { StripChart } from "#/components/strip-chart";
 import { accountsQuery } from "#/lib/accounts";
+import { formatDateTime } from "#/lib/format";
 import {
 	modelPricesQuery,
 	priceSourcesQuery,
@@ -21,8 +23,8 @@ import {
 	type GroupKey,
 	inputTokens,
 	outputTokens,
-	RANGES,
 	type RangeKey,
+	rangeName,
 	rangeSearch,
 	type StatsGroup,
 	statsQuery,
@@ -40,7 +42,8 @@ const CHART_GROUPS = {
 };
 
 function OverviewPage() {
-	const { range, group } = Route.useSearch();
+	const { range: preset, from, to, group } = Route.useSearch();
+	const range = { range: preset, from, to };
 	const navigate = useNavigate({ from: Route.fullPath });
 	const chartGroup = group === "none" ? "model" : group;
 	const chart = useQuery(statsQuery({ range, group: chartGroup }));
@@ -54,12 +57,17 @@ function OverviewPage() {
 				title="Overview"
 				description="What the requests through this gateway would cost at API prices, and where they went."
 				actions={
-					<Segmented
-						label="Time range"
-						options={RANGES}
+					<RangePicker
 						value={range}
 						onChange={(next) =>
-							navigate({ search: (s) => ({ ...s, range: next }) })
+							navigate({
+								search: (s) => ({
+									...s,
+									from: undefined,
+									to: undefined,
+									...next,
+								}),
+							})
 						}
 					/>
 				}
@@ -70,7 +78,7 @@ function OverviewPage() {
 			{stats && stats.totals.requests === 0 && <Empty />}
 			{stats && stats.totals.requests > 0 && (
 				<>
-					<Reading totals={stats.totals} range={RANGES[range]} />
+					<Reading totals={stats.totals} range={rangeName(range)} />
 					<section className="space-y-4 rounded-xl border bg-card p-5">
 						<div className="flex flex-wrap items-center justify-between gap-3">
 							<h2 className="font-semibold">API value over time</h2>
@@ -90,13 +98,13 @@ function OverviewPage() {
 							title="Top models"
 							groups={models.data?.groups}
 							total={stats.totals.cost_nano}
-							usage={{ range, group: "model" }}
+							usage={{ ...range, group: "model" }}
 						/>
 						<TopList
 							title="Top API keys"
 							groups={keys.data?.groups}
 							total={stats.totals.cost_nano}
-							usage={{ range, group: "key" }}
+							usage={{ ...range, group: "key" }}
 						/>
 					</div>
 				</>
@@ -213,7 +221,7 @@ function TopList({
 	groups: StatsGroup[] | undefined;
 	total: number;
 	/** The Usage page with the same range and grouping. */
-	usage: { range: RangeKey; group: GroupKey };
+	usage: { range: RangeKey; from?: string; to?: string; group: GroupKey };
 }) {
 	const top = (groups ?? []).slice(0, 6);
 	return (
@@ -318,10 +326,10 @@ function Attention() {
 				to: "/subscriptions" as const,
 			})),
 		...accounts
-			.filter((a) => a.status === "limited")
+			.filter((a) => (a.limited_until ?? 0) > Date.now() / 1000)
 			.map((a) => ({
 				key: `limited-${a.id}`,
-				text: `${a.label ?? a.email ?? `Account ${a.id}`} reached its usage limit.`,
+				text: `${a.label ?? a.email ?? `Account ${a.id}`} reached its usage limit until ${formatDateTime(a.limited_until ?? 0)}.`,
 				to: "/subscriptions" as const,
 			})),
 		...sources
