@@ -250,11 +250,14 @@ function ClaudeCodeSetup({ aliases }: { aliases: Alias[] }) {
 		{ value: NONE, label: "Not set" },
 		...aliases.map((a) => ({ value: a.name, label: a.name })),
 	];
+	// A renamed or deleted alias falls back to "not set".
+	const chosen = (env: string) =>
+		aliases.some((a) => a.name === slots[env]) ? slots[env] : NONE;
 	const lines = [
 		`export ANTHROPIC_BASE_URL=${window.location.origin}`,
 		"export ANTHROPIC_AUTH_TOKEN=<your gateway API key>",
-		...SLOTS.filter((s) => slots[s.env] !== NONE).map(
-			(s) => `export ${s.env}=${slots[s.env]}`,
+		...SLOTS.filter((s) => chosen(s.env) !== NONE).map(
+			(s) => `export ${s.env}=${chosen(s.env)}`,
 		),
 	];
 	const text = lines.join("\n");
@@ -274,7 +277,7 @@ function ClaudeCodeSetup({ aliases }: { aliases: Alias[] }) {
 						<FieldLabel htmlFor={slot.env}>{slot.label}</FieldLabel>
 						<Select
 							items={items}
-							value={slots[slot.env]}
+							value={chosen(slot.env)}
 							onValueChange={(v) =>
 								v && setSlots((s) => ({ ...s, [slot.env]: v }))
 							}

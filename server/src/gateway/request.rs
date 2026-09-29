@@ -74,6 +74,18 @@ pub async fn prepare(
             ),
         ));
     }
+    let preview = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "web_search_preview");
+    if preview && route.upstream == Upstream::ChatGpt {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            "ChatGPT models do not support `web_search_preview`. Use `web_search`.",
+        ));
+    }
     // Anthropic can block search domains; the other upstreams cannot.
     let blocked_domains = body["tools"]
         .as_array()
@@ -279,8 +291,14 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
-/// The ChatGPT backend refuses `web_search_preview`.
-const HOSTED_TOOLS: [&str; 4] = ["function", "custom", "web_search", "anthropic_builtin"];
+/// `web_search_preview` works only on OpenAI connections (checked after routing).
+const HOSTED_TOOLS: [&str; 5] = [
+    "function",
+    "custom",
+    "web_search",
+    "web_search_preview",
+    "anthropic_builtin",
+];
 
 fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
     for tool in body["tools"].as_array().into_iter().flatten() {

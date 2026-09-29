@@ -898,7 +898,14 @@ impl MessagesDecoder {
                 name,
                 arguments,
             }) => {
+                // A call without arguments gets `{}`, also as a delta: stream clients build the
+                // arguments from the deltas.
                 let arguments = if arguments.trim().is_empty() {
+                    self.emit(
+                        out,
+                        "response.function_call_arguments.delta",
+                        json!({ "item_id": item_id, "output_index": index, "delta": "{}" }),
+                    );
                     "{}".to_owned()
                 } else {
                     arguments

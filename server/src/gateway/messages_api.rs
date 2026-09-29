@@ -447,6 +447,19 @@ fn content_part(block: &Value) -> Result<Option<Value>, String> {
                 "filename": block["title"].as_str().unwrap_or("document.pdf"),
             })),
             Some("text") => Some(json!({ "type": "input_text", "text": source["data"] })),
+            // Inline content: its text blocks (images in it are not supported).
+            Some("content") => {
+                let text = match &source["content"] {
+                    Value::String(text) => text.clone(),
+                    Value::Array(blocks) => blocks
+                        .iter()
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                Some(json!({ "type": "input_text", "text": text }))
+            }
             Some("url") => Some(json!({ "type": "input_file", "file_url": source["url"] })),
             _ => return Err("This document source is not supported.".into()),
         },

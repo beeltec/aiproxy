@@ -298,27 +298,26 @@ pub(super) async fn attempt(
     }
 }
 
-/// Reads a JSON answer body with a size limit, within the headers timeout.
+/// Reads a JSON answer body with a size limit. Each chunk must come within the idle timeout;
+/// the total time is the engine's limit.
 async fn read_json(response: reqwest::Response, limit: usize) -> Result<Value, Failure> {
     let mut chunks = response.bytes_stream();
     let mut body = Vec::new();
-    let read = async {
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|err| upstream_failure(&format!("The upstream answer broke: {err}")))?;
-            body.extend_from_slice(&chunk);
-            if body.len() > limit {
-                return Err(too_large("The answer is larger than the limit."));
-            }
+    loop {
+        let chunk = tokio::time::timeout(IDLE_TIMEOUT, chunks.next()).await.map_err(|_| {
+            Failure::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "The upstream sent nothing for 5 minutes.",
+            )
+        })?;
+        let Some(chunk) = chunk else { break };
+        let chunk = chunk.map_err(|err| upstream_failure(&format!("The upstream answer broke: {err}")))?;
+        body.extend_from_slice(&chunk);
+        if body.len() > limit {
+            return Err(too_large("The answer is larger than the limit."));
         }
-        Ok(())
-    };
-    tokio::time::timeout(HEADERS_TIMEOUT, read).await.map_err(|_| {
-        Failure::new(
-            StatusCode::GATEWAY_TIMEOUT,
-            "upstream_timeout",
-            "The upstream answer came too slowly.",
-        )
-    })??;
+    }
     serde_json::from_slice(&body).map_err(|_| upstream_failure("The upstream answer is not JSON."))
 }
 
@@ -659,9 +658,11 @@ fn force_responses_fields(body: &mut Value) {
     let mut include: Vec<Value> = body["include"].as_array().cloned().unwrap_or_default();
     let mut wanted = vec!["reasoning.encrypted_content"];
     // Without this, OpenAI does not return the pages that a web search found.
-    let searches = body["tools"]
-        .as_array()
-        .is_some_and(|tools| tools.iter().any(|t| t["type"].as_str().is_some_and(|k| k.starts_with("web_search"))));
+    let searches = body["tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|t| t["type"].as_str().is_some_and(|k| k.starts_with("web_search")))
+    });
     if searches {
         wanted.push("web_search_call.action.sources");
     }
