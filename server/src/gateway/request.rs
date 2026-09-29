@@ -10,7 +10,7 @@ use crate::connections::Kind;
 use crate::state::AppState;
 
 /// Output tokens reserved for the tokens-per-minute limit when the client sets no maximum.
-const DEFAULT_OUTPUT_RESERVE: i64 = 4_000;
+pub(super) const DEFAULT_OUTPUT_RESERVE: i64 = 4_000;
 const MAX_OUTPUT_RESERVE: i64 = 8_000;
 const MAX_MODEL_NAME: usize = 200;
 
@@ -84,6 +84,22 @@ pub async fn prepare(
             StatusCode::BAD_REQUEST,
             "unsupported_tool",
             "ChatGPT models do not support `web_search_preview`. Use `web_search`.",
+        ));
+    }
+    let image_tool = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "image_generation");
+    let openai_like = matches!(
+        route.upstream,
+        Upstream::ChatGpt | Upstream::Connection { kind: Kind::OpenAi, .. }
+    );
+    if image_tool && !openai_like {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            "The image-generation tool works only with ChatGPT and OpenAI models.",
         ));
     }
     // Anthropic can block search domains; the other upstreams cannot.
@@ -291,12 +307,14 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
-/// `web_search_preview` works only on OpenAI connections (checked after routing).
-const HOSTED_TOOLS: [&str; 5] = [
+/// `web_search_preview` works only on OpenAI connections, `image_generation` only on ChatGPT
+/// and OpenAI (checked after routing).
+const HOSTED_TOOLS: [&str; 6] = [
     "function",
     "custom",
     "web_search",
     "web_search_preview",
+    "image_generation",
     "anthropic_builtin",
 ];
 
@@ -345,7 +363,13 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
             stored_reference = true;
         }
     });
-    if stored_reference {
+    // The image-generation tool can take its mask as a stored file.
+    let stored_mask = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| !tool["input_image_mask"]["file_id"].is_null());
+    if stored_reference || stored_mask {
         return Err(bad(
             "References to stored items or files are not supported. Send the content inline.",
         ));

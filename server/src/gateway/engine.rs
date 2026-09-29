@@ -17,7 +17,7 @@ use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Row, Tokens};
+use crate::usage::{Media, Row, Tokens};
 
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -137,6 +137,23 @@ pub(super) struct Outcome {
     pub searches_uncounted: bool,
     /// The upstream format of a native stream: its errors go out in that format.
     pub native_wire: Option<provider::Wire>,
+    /// Finished image-generation calls without their image data, also known when the stream
+    /// stops early.
+    pub image_calls: Vec<Value>,
+}
+
+impl Outcome {
+    /// Keeps a finished output item when it is an image-generation call.
+    pub fn note_item(&mut self, item: &Value) {
+        if item["type"] != "image_generation_call" {
+            return;
+        }
+        let mut call = item.clone();
+        if call["result"].is_string() {
+            call["result"] = json!("");
+        }
+        self.image_calls.push(call);
+    }
 }
 
 async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failure>>, tx: mpsc::Sender<Msg>) {
@@ -460,6 +477,7 @@ async fn stream_events(
             if data["item"]["type"] == "web_search_call" && data["item"]["action"]["type"] == "search" {
                 outcome.web_search_calls += 1;
             }
+            outcome.note_item(&data["item"]);
             output_items.push(data["item"].clone());
         }
         if kind.ends_with(".delta") {
@@ -563,15 +581,40 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     let mut tokens = tokens;
     tokens.inexact |= outcome.searches_uncounted;
+    // A stream that stopped early has no final response, but its finished image calls count.
+    let image_tool = response.and_then(image_tool_usage).or_else(|| {
+        let calls = json!({ "output": outcome.image_calls, "tools": job.body["tools"] });
+        image_tool_usage(&calls)
+    });
+    // The Images API handler answers a response without an image with an error.
+    let no_image = job.client_format == "images"
+        && outcome.status == 200
+        && image_tool
+            .as_ref()
+            .is_none_or(|(_, _, _, media)| media.images_generated == 0);
+    let (status_code, error_kind) = if no_image {
+        (StatusCode::BAD_GATEWAY.as_u16(), Some("no_image".to_owned()))
+    } else {
+        (outcome.status, outcome.error_kind.clone())
+    };
+    let image_estimated = image_tool
+        .as_ref()
+        .is_some_and(|(_, _, status, _)| *status == "estimated");
+    let image_tokens = image_tool
+        .as_ref()
+        .map_or(0, |(_, tokens, _, _)| tokens.input() + tokens.output());
+    let used = tokens.input() + tokens.output() + image_tokens;
     // Without reported usage the real use is unknown, so keep at least the reservation.
-    let used = match usage_status {
-        "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
-        _ => tokens.input() + tokens.output(),
+    let used = if usage_status == "estimated" || image_estimated {
+        used.max(job.reserved_tokens)
+    } else {
+        used
     };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
     let row = Row {
         request_id: random_token(12),
+        component: "model",
         time: now(),
         api_key_id: job.key.id,
         route: job.route_name,
@@ -595,16 +638,83 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
             .clone()
             .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
         streamed: job.stream,
-        status_code: outcome.status,
-        error_kind: outcome.error_kind.clone(),
+        status_code,
+        error_kind,
         latency_ms: started.elapsed().as_millis() as i64,
         first_token_ms: outcome.first_token_ms,
         usage_status,
         tokens,
         web_search_calls: outcome.web_search_calls,
         failover_attempts: (outcome.attempts - 1).max(0),
+        media: Media {
+            input_images: input_images(&job.body["input"]),
+            ..Media::default()
+        },
     };
-    state.usage.record(row).await;
+    // The image tool is its own billing component: the image model with its own tokens.
+    let image_row = image_tool.map(|(model, tokens, usage_status, media)| Row {
+        component: "image_tool",
+        resolved_model: Some(model),
+        effort: None,
+        service_tier_requested: None,
+        service_tier_reported: None,
+        first_token_ms: None,
+        usage_status,
+        tokens,
+        web_search_calls: 0,
+        failover_attempts: 0,
+        media,
+        ..row.clone()
+    });
+    state
+        .usage
+        .record_all(std::iter::once(row).chain(image_row).collect())
+        .await;
+}
+
+/// Images in the request input (content parts and tool outputs).
+fn input_images(input: &Value) -> i64 {
+    let parts = |item: &Value| {
+        ["content", "output"]
+            .iter()
+            .flat_map(|field| item[*field].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "input_image")
+            .count()
+    };
+    input.as_array().into_iter().flatten().map(parts).sum::<usize>() as i64
+}
+
+/// The image-generation tool component of a response: the image model, its tokens, the usage
+/// status and the images. `None` when the response has no image-generation call.
+fn image_tool_usage(response: &Value) -> Option<(String, Tokens, &'static str, Media)> {
+    let calls: Vec<&Value> = response["output"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "image_generation_call")
+        .collect();
+    let first = calls.first()?;
+    let usage = &response["tool_usage"]["image_gen"];
+    let (tokens, usage_status) = if usage.is_object() {
+        (Tokens::from_image(usage, false), "reported")
+    } else {
+        (Tokens::default(), "estimated")
+    };
+    let model = response["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|tool| tool["type"] == "image_generation")
+        .and_then(|tool| tool["model"].as_str())
+        .unwrap_or("image_generation")
+        .to_owned();
+    let media = Media {
+        images_generated: calls.iter().filter(|call| call["result"].is_string()).count() as i64,
+        image_size: first["size"].as_str().map(str::to_owned),
+        image_quality: first["quality"].as_str().map(str::to_owned),
+        ..Media::default()
+    };
+    Some((model, tokens, usage_status, media))
 }
 
 fn db_failure(err: &sqlx::Error) -> Failure {

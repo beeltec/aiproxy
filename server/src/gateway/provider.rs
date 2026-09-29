@@ -20,7 +20,7 @@ use crate::connections::{Connection, Kind};
 use crate::state::AppState;
 use crate::usage::Tokens;
 
-const HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The format of the upstream endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -298,6 +298,7 @@ pub(super) async fn attempt(
                 {
                     outcome.web_search_calls += 1;
                 }
+                outcome.note_item(item);
                 output_items.push(event.data["item"].clone());
             }
             let terminal = event.kind == "response.completed" || event.kind == "response.incomplete";
@@ -551,7 +552,7 @@ pub(super) async fn count_tokens(
 
 /// Maps an upstream error answer. A refused provider key is the gateway's problem, not the
 /// client's, so it becomes a 502.
-async fn error_answer(response: reqwest::Response) -> Failure {
+pub(super) async fn error_answer(response: reqwest::Response) -> Failure {
     let status = response.status();
     let retry_after = response
         .headers()
@@ -581,6 +582,20 @@ async fn error_answer(response: reqwest::Response) -> Failure {
     failure
 }
 
+/// OpenRouter fallbacks and provider routing would pick models that the key may not use.
+pub(super) fn check_openrouter_routing(body: &Value) -> Result<(), Failure> {
+    for field in ["models", "provider", "preset"] {
+        if !body[field].is_null() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` is not supported: it would skip the model list of the key."),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The client body with the upstream model name, the alias defaults, and the fields the
 /// gateway always sets.
 fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>), Failure> {
@@ -596,15 +611,8 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
             ));
         }
     }
-    // OpenRouter fallbacks and provider routing would pick models that the key may not use.
-    for field in ["models", "provider", "preset"] {
-        if kind == Kind::OpenRouter && !body[field].is_null() {
-            return Err(Failure::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                format!("`{field}` is not supported: it would skip the model list of the key."),
-            ));
-        }
+    if kind == Kind::OpenRouter {
+        check_openrouter_routing(&body)?;
     }
     // OpenRouter plugins are hosted tools; only its web search is allowed.
     let mut plugins = body["plugins"].as_array().into_iter().flatten();
@@ -868,11 +876,11 @@ impl Tap {
                 if kind.ends_with(".delta") {
                     text(&json["delta"]);
                 }
-                if kind == "response.output_item.done"
-                    && json["item"]["type"] == "web_search_call"
-                    && json["item"]["action"]["type"] == "search"
-                {
-                    outcome.web_search_calls += 1;
+                if kind == "response.output_item.done" {
+                    if json["item"]["type"] == "web_search_call" && json["item"]["action"]["type"] == "search" {
+                        outcome.web_search_calls += 1;
+                    }
+                    outcome.note_item(&json["item"]);
                 }
                 match kind {
                     "response.completed" | "response.incomplete" => {

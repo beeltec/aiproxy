@@ -1,7 +1,7 @@
 //! Usage records. Handlers send rows to one writer task through a bounded queue.
 
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{mpsc, oneshot};
 
 /// Token counts as billing categories that do not overlap.
@@ -92,6 +92,36 @@ impl Tokens {
         }
     }
 
+    /// Splits the usage of an image model (Images API, image-generation tool). Without cache
+    /// details the cached count is 0 when `cache_known` (the Images API has no cache price), else
+    /// unknown, and then the split is not exact.
+    pub fn from_image(usage: &Value, cache_known: bool) -> Self {
+        let n = |v: &Value| v.as_i64().unwrap_or(0).max(0);
+        let input = &usage["input_tokens_details"];
+        let output = &usage["output_tokens_details"];
+        let text = n(&input["text_tokens"]);
+        let image = n(&input["image_tokens"]);
+        // A cached count without a split goes to text first.
+        let cached = n(&input["cached_tokens"]);
+        let text_cached = cached.min(text);
+        let image_cached = (cached - text_cached).min(image);
+        let (output_image, output_text) = if output.is_object() {
+            (n(&output["image_tokens"]), n(&output["text_tokens"]))
+        } else {
+            (n(&usage["output_tokens"]), 0)
+        };
+        Self {
+            input_text: text - text_cached,
+            input_text_cached: text_cached,
+            input_image: image - image_cached,
+            input_image_cached: image_cached,
+            output_text,
+            output_image,
+            inexact: (!cache_known && input["cached_tokens"].is_null()) || (cached > 0 && text > 0 && image > 0),
+            ..Self::default()
+        }
+    }
+
     /// The usage in the Responses shape, for clients.
     pub fn to_responses_usage(&self) -> Value {
         let input = self.input();
@@ -121,9 +151,22 @@ impl Tokens {
     }
 }
 
+/// Quantities of media requests and of the image-generation tool.
+#[derive(Clone, Debug, Default)]
+pub struct Media {
+    pub images_generated: i64,
+    pub image_size: Option<String>,
+    pub image_quality: Option<String>,
+    pub input_images: i64,
+    pub characters: i64,
+    pub seconds: Option<f64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Row {
     pub request_id: String,
+    /// `model`, or `image_tool` for the second row of a request that used the image tool.
+    pub component: &'static str,
     pub time: i64,
     pub api_key_id: i64,
     pub route: &'static str,
@@ -148,10 +191,12 @@ pub struct Row {
     pub tokens: Tokens,
     pub web_search_calls: i64,
     pub failover_attempts: i64,
+    pub media: Media,
 }
 
 enum Job {
-    Row(Box<Row>),
+    /// The rows of one request (its billing components).
+    Rows(Vec<Row>),
     /// Answers when all rows queued before it are saved.
     Flush(oneshot::Sender<()>),
 }
@@ -170,9 +215,10 @@ impl UsageWriter {
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 match job {
-                    Job::Row(row) => {
-                        if let Err(err) = insert(&db, &row).await {
-                            tracing::error!(error = %err, request = %row.request_id, "cannot save a usage row");
+                    Job::Rows(rows) => {
+                        if let Err(err) = insert_all(&db, &rows).await {
+                            let request = rows.first().map(|row| row.request_id.as_str()).unwrap_or_default();
+                            tracing::error!(error = %err, request, "cannot save the usage rows");
                         }
                     }
                     Job::Flush(done) => {
@@ -186,7 +232,12 @@ impl UsageWriter {
 
     /// Queues a row. When the queue is full, this waits (no row is lost).
     pub async fn record(&self, row: Row) {
-        if self.sender.send(Job::Row(Box::new(row))).await.is_err() {
+        self.record_all(vec![row]).await;
+    }
+
+    /// Queues the rows of one request. They are saved together or not at all.
+    pub async fn record_all(&self, rows: Vec<Row>) {
+        if self.sender.send(Job::Rows(rows)).await.is_err() {
             tracing::error!("the usage writer stopped");
         }
     }
@@ -200,22 +251,32 @@ impl UsageWriter {
     }
 }
 
-async fn insert(db: &SqlitePool, row: &Row) -> Result<(), sqlx::Error> {
+async fn insert_all(db: &SqlitePool, rows: &[Row]) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    for row in rows {
+        insert(&mut tx, row).await?;
+    }
+    tx.commit().await
+}
+
+async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error> {
     let t = &row.tokens;
     // Rows of deleted keys, accounts or connections keep NULL, so the insert does not fail on
     // the foreign key.
     sqlx::query(
-        "INSERT INTO usage (request_id, time, api_key_id, route, client_format, upstream, chatgpt_account_id,
+        "INSERT INTO usage (request_id, component, time, api_key_id, route, client_format, upstream, chatgpt_account_id,
              connection_id, requested_model, resolved_model, alias, effort, service_tier_requested,
              service_tier_reported, streamed, status_code, error_kind, latency_ms, first_token_ms, usage_status,
              usage_exact, input_text, input_text_cached, input_audio, input_audio_cached, cache_write_5m,
              cache_write_1h, input_image, input_image_cached, output_text, output_reasoning, output_audio,
-             output_image, web_search_calls, failover_attempts)
-         VALUES (?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
+             output_image, web_search_calls, failover_attempts, images_generated, image_size, image_quality,
+             input_images, characters, seconds)
+         VALUES (?, ?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
              (SELECT id FROM connections WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?)",
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.request_id)
+    .bind(row.component)
     .bind(row.time)
     .bind(row.api_key_id)
     .bind(row.route)
@@ -250,6 +311,12 @@ async fn insert(db: &SqlitePool, row: &Row) -> Result<(), sqlx::Error> {
     .bind(t.output_image)
     .bind(row.web_search_calls)
     .bind(row.failover_attempts)
+    .bind(row.media.images_generated)
+    .bind(&row.media.image_size)
+    .bind(&row.media.image_quality)
+    .bind(row.media.input_images)
+    .bind(row.media.characters)
+    .bind(row.media.seconds)
     .execute(db)
     .await?;
     Ok(())
