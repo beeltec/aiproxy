@@ -62,7 +62,7 @@ import {
 	recomputeQuery,
 	SOURCE_NAMES,
 } from "#/lib/pricing";
-import { formatCount, localDate, rangeBounds } from "#/lib/stats";
+import { formatCount, localDate, rangeBounds, statsQuery } from "#/lib/stats";
 import { cn } from "#/lib/utils";
 
 export const Route = createFileRoute("/_app/pricing")({
@@ -708,7 +708,11 @@ function Recompute() {
 	const [to, setTo] = useState(localDate(new Date(today * 1000)));
 	// Empty: all models.
 	const [models, setModels] = useState<string[]>([]);
-	const { data: enabled = [] } = useQuery(modelPricesQuery);
+	// The models with stored usage in the dates (also disabled models and the image tool).
+	const used =
+		useQuery(
+			statsQuery({ range: { range: "custom", from, to }, group: "model" }),
+		).data?.groups ?? [];
 	const start = useMutation({
 		mutationFn: () => {
 			// From the first local midnight to the one after the last day.
@@ -781,19 +785,24 @@ function Recompute() {
 							align="start"
 							className="max-h-80 w-80 overflow-y-auto"
 						>
-							{enabled.map((m) => (
+							{used.length === 0 && (
+								<p className="px-2 py-1.5 text-xs text-muted-foreground">
+									No requests in these dates.
+								</p>
+							)}
+							{used.map((m) => (
 								<DropdownMenuCheckboxItem
-									key={m.model}
-									checked={models.includes(m.model)}
+									key={m.key}
+									checked={models.includes(m.key)}
 									onCheckedChange={(checked) =>
 										setModels(
 											checked
-												? [...models, m.model]
-												: models.filter((name) => name !== m.model),
+												? [...models, m.key]
+												: models.filter((name) => name !== m.key),
 										)
 									}
 								>
-									<span className="truncate font-mono text-xs">{m.model}</span>
+									<span className="truncate font-mono text-xs">{m.label}</span>
 								</DropdownMenuCheckboxItem>
 							))}
 						</DropdownMenuContent>

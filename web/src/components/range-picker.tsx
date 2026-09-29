@@ -29,11 +29,11 @@ export function RangePicker({
 				onChange={pick}
 			/>
 			{value.range === "custom" && (
-				<div className="flex items-center gap-1.5 text-sm">
+				<div className="flex flex-wrap items-center gap-1.5 text-sm">
 					<Input
 						type="date"
 						aria-label="First day"
-						className="h-8 w-40"
+						className="h-8 w-36"
 						value={value.from ?? ""}
 						max={value.to}
 						onChange={(e) =>
@@ -44,7 +44,7 @@ export function RangePicker({
 					<Input
 						type="date"
 						aria-label="Last day"
-						className="h-8 w-40"
+						className="h-8 w-36"
 						value={value.to ?? ""}
 						min={value.from}
 						onChange={(e) =>

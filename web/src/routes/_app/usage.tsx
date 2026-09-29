@@ -162,7 +162,7 @@ function UsageTable({
 			<Table>
 				<TableHeader>
 					<TableRow>
-						<TableHead className="sticky left-0 z-10 bg-card">
+						<TableHead className="z-10 bg-card sm:sticky sm:left-0">
 							{grouped ? "Group" : "Requests"}
 						</TableHead>
 						<TableHead className="text-right">Requests</TableHead>
@@ -210,7 +210,7 @@ function Row({
 }) {
 	return (
 		<TableRow>
-			<TableCell className="sticky left-0 z-10 max-w-64 truncate bg-card font-medium">
+			<TableCell className="z-10 max-w-40 truncate bg-card font-medium sm:sticky sm:left-0 sm:max-w-64">
 				{label}
 			</TableCell>
 			<TableCell className="text-right font-mono text-xs tabular-nums">
