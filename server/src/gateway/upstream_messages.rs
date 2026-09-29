@@ -126,16 +126,28 @@ pub fn fit_thinking_budget(body: &mut Value) {
 
 /// Anthropic refuses forced tools with manual thinking, and some models also with adaptive
 /// thinking. Then thinking is left out for the request.
-/// A model that always thinks cannot leave thinking out; then the request is refused.
+/// Turns thinking off. A missing field is not enough: newer models think by default. Opus 5
+/// refuses `disabled` above effort `high`.
+fn turn_thinking_off(body: &mut Value) {
+    body["thinking"] = json!({ "type": "disabled" });
+    if matches!(body["output_config"]["effort"].as_str(), Some("xhigh" | "max")) {
+        body["output_config"]["effort"] = json!("high");
+    }
+}
+
+/// Forced tools (`any` or a named tool) do not work with manual thinking; adaptive thinking
+/// allows them, except on models with `forced_tools_with_thinking: false`. Thinking is turned
+/// off for such a request; a model that always thinks gets a 400 instead.
 fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) -> Result<(), &'static str> {
     let forced = matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool"));
-    let thinking = body["thinking"]["type"].as_str();
     let always_on = capabilities["thinking_always_on"] == true;
-    // Without a thinking field, a model that always thinks uses adaptive thinking.
-    let adaptive = thinking == Some("adaptive")
-        || (thinking.is_none() && always_on && capabilities["thinking"]["adaptive"] == true);
-    let allowed = adaptive && capabilities["forced_tools_with_thinking"] == true;
-    if !forced || allowed || !(always_on || matches!(thinking, Some("enabled" | "adaptive"))) {
+    let conflict = match body["thinking"]["type"].as_str() {
+        Some("enabled") => true,
+        Some("disabled") => false,
+        // Adaptive, or the model's default thinking.
+        _ => capabilities["forced_tools_with_thinking"] == false,
+    };
+    if !forced || !conflict {
         return Ok(());
     }
     if always_on {
@@ -143,9 +155,7 @@ fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) -> Res
             "This model always thinks, and it cannot use a forced tool choice with thinking. Use tool choice auto.",
         );
     }
-    if let Some(map) = body.as_object_mut() {
-        map.remove("thinking");
-    }
+    turn_thinking_off(body);
     Ok(())
 }
 
@@ -569,11 +579,7 @@ pub fn encode(
                     .into(),
             );
         }
-        if matches!(body_out["thinking"]["type"].as_str(), Some("enabled" | "adaptive"))
-            && let Some(map) = body_out.as_object_mut()
-        {
-            map.remove("thinking");
-        }
+        turn_thinking_off(&mut body_out);
     }
     drop_thinking_for_forced_tools(&mut body_out, capabilities)?;
     let thinking_on = matches!(body_out["thinking"]["type"].as_str(), Some("enabled" | "adaptive"));

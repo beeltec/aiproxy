@@ -967,7 +967,7 @@ function toDraft(c: Capabilities): Draft {
 		chat: !c.endpoints || c.endpoints.includes("chat"),
 		responses: !c.endpoints || c.endpoints.includes("responses"),
 		chatTools: c.chat_tools ?? true,
-		forcedTools: c.forced_tools_with_thinking ?? false,
+		forcedTools: c.forced_tools_with_thinking ?? true,
 		alwaysThinks: c.thinking_always_on ?? false,
 	};
 }
@@ -1204,7 +1204,7 @@ function CapabilityForm({
 					<>
 						<Toggle
 							label="Forced tools with thinking"
-							description="Off: a forced tool choice turns thinking off for that request."
+							description="Off: a forced tool choice turns thinking off for that request (or fails when the model always thinks)."
 							checked={draft.forcedTools}
 							onChange={(v) => set("forcedTools", v)}
 						/>

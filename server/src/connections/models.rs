@@ -6,7 +6,8 @@
 //! - `context_window`, `max_output`: token limits
 //! - `endpoints`: OpenAI endpoints (`chat`, `responses`); `chat_tools`: false when function tools
 //!   work only on Responses; `mode`: the LiteLLM mode (`chat`, `embedding`, ...)
-//! - `thinking`: Anthropic thinking types (`adaptive`, `enabled`); `forced_tools_with_thinking`;
+//! - `thinking`: Anthropic thinking types (`adaptive`, `enabled`); `forced_tools_with_thinking`
+//!   (false: forced tools do not work with adaptive thinking; unknown means they do);
 //!   `thinking_always_on`: the model cannot turn thinking off
 
 use std::time::Duration;
@@ -281,6 +282,16 @@ fn anthropic_capabilities(catalog: &Catalog, model: &Value) -> Value {
         .is_some_and(|entry| entry["thinking_always_on"] == true)
     {
         out.insert("thinking_always_on".into(), json!(true));
+    }
+    // The Anthropic thinking docs: these models refuse forced tool use on every request.
+    const NO_FORCED_TOOLS: [&str; 4] = [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+    ];
+    if NO_FORCED_TOOLS.iter().any(|prefix| id.starts_with(prefix)) {
+        out.insert("forced_tools_with_thinking".into(), json!(false));
     }
     for (field, key) in [("max_input_tokens", "context_window"), ("max_tokens", "max_output")] {
         if let Some(value) = model[field].as_i64().filter(|v| *v > 0) {
