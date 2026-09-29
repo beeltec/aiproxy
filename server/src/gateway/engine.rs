@@ -137,6 +137,23 @@ pub(super) struct Outcome {
     pub searches_uncounted: bool,
     /// The upstream format of a native stream: its errors go out in that format.
     pub native_wire: Option<provider::Wire>,
+    /// Finished image-generation calls without their image data, also known when the stream
+    /// stops early.
+    pub image_calls: Vec<Value>,
+}
+
+impl Outcome {
+    /// Keeps a finished output item when it is an image-generation call.
+    pub fn note_item(&mut self, item: &Value) {
+        if item["type"] != "image_generation_call" {
+            return;
+        }
+        let mut call = item.clone();
+        if call["result"].is_string() {
+            call["result"] = json!("");
+        }
+        self.image_calls.push(call);
+    }
 }
 
 async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failure>>, tx: mpsc::Sender<Msg>) {
@@ -460,6 +477,7 @@ async fn stream_events(
             if data["item"]["type"] == "web_search_call" && data["item"]["action"]["type"] == "search" {
                 outcome.web_search_calls += 1;
             }
+            outcome.note_item(&data["item"]);
             output_items.push(data["item"].clone());
         }
         if kind.ends_with(".delta") {
@@ -563,15 +581,24 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     let mut tokens = tokens;
     tokens.inexact |= outcome.searches_uncounted;
-    let image_tool = response.and_then(image_tool_usage);
-    // Without reported usage the real use is unknown, so keep at least the reservation.
+    // A stream that stopped early has no final response, but its finished image calls count.
+    let image_tool = response.and_then(image_tool_usage).or_else(|| {
+        let calls = json!({ "output": outcome.image_calls, "tools": job.body["tools"] });
+        image_tool_usage(&calls)
+    });
+    let image_estimated = image_tool
+        .as_ref()
+        .is_some_and(|(_, _, status, _)| *status == "estimated");
     let image_tokens = image_tool
         .as_ref()
         .map_or(0, |(_, tokens, _, _)| tokens.input() + tokens.output());
-    let used = match usage_status {
-        "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
-        _ => tokens.input() + tokens.output(),
-    } + image_tokens;
+    let used = tokens.input() + tokens.output() + image_tokens;
+    // Without reported usage the real use is unknown, so keep at least the reservation.
+    let used = if usage_status == "estimated" || image_estimated {
+        used.max(job.reserved_tokens)
+    } else {
+        used
+    };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
     let row = Row {

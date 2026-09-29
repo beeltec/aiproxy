@@ -285,6 +285,14 @@ fn broken(err: &reqwest::Error) -> Failure {
     )
 }
 
+fn ended_early() -> Failure {
+    Failure::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_closed",
+        "The upstream stream ended before its last event.",
+    )
+}
+
 fn idle() -> Failure {
     Failure::new(
         StatusCode::GATEWAY_TIMEOUT,
@@ -330,8 +338,8 @@ fn with_content_type(mut response: Response, content_type: &str) -> Response {
 
 /// Forwards a streamed answer (SSE or binary audio) as it is. `finish` gets the last SSE event
 /// that has a `usage` object (without image data) and gives the usage row, which is written
-/// when the stream ends. A failure ends the body with an error, so the client does not take a
-/// cut answer as complete.
+/// when the stream ends. An SSE answer without that event, an `error` event, or another
+/// failure ends the body with an error, so the client does not take a cut answer as complete.
 fn forward(
     state: &AppState,
     call: Call,
@@ -346,8 +354,8 @@ fn forward(
         let deadline = call.deadline();
         let mut chunks = response.bytes_stream();
         let mut line = Vec::new();
-        let mut too_long = false;
         let mut last = None;
+        let mut upstream_error = None;
         let failure = loop {
             let next = tokio::select! {
                 next = tokio::time::timeout(IDLE_TIMEOUT, chunks.next()) => next,
@@ -357,35 +365,49 @@ fn forward(
             };
             let chunk = match next {
                 Ok(Some(Ok(chunk))) => chunk,
-                Ok(None) => break None,
+                // Every SSE answer ends with an event that has the usage.
+                Ok(None) if sse && last.is_none() => {
+                    break Some(upstream_error.take().unwrap_or_else(ended_early));
+                }
+                Ok(None) => break upstream_error.take(),
                 Ok(Some(Err(err))) => break Some(broken(&err)),
                 Err(_) => break Some(idle()),
             };
             if sse {
                 let mut pieces = chunk.split(|byte| *byte == b'\n').peekable();
+                let mut too_long = false;
                 while let Some(piece) = pieces.next() {
-                    if line.len() + piece.len() <= MAX_EVENT_BYTES {
-                        line.extend_from_slice(piece);
-                    } else {
-                        line.clear();
+                    if line.len() + piece.len() > MAX_EVENT_BYTES {
                         too_long = true;
+                        break;
                     }
+                    line.extend_from_slice(piece);
                     // The last piece has no line end yet.
                     if pieces.peek().is_none() {
                         break;
                     }
-                    if !too_long
-                        && let Some(data) = line.strip_prefix(b"data: ")
+                    if let Some(data) = line.strip_prefix(b"data: ")
                         && let Ok(mut event) = serde_json::from_slice::<Value>(data)
-                        && event["usage"].is_object()
                     {
-                        if let Some(event) = event.as_object_mut() {
-                            event.remove("b64_json");
+                        if event["type"] == "error" {
+                            let message = event["error"]["message"].as_str().or(event["message"].as_str());
+                            upstream_error = Some(Failure::new(
+                                StatusCode::BAD_GATEWAY,
+                                "upstream_error",
+                                message.unwrap_or("The upstream failed.").to_owned(),
+                            ));
                         }
-                        last = Some(event);
+                        if event["usage"].is_object() {
+                            if let Some(event) = event.as_object_mut() {
+                                event.remove("b64_json");
+                            }
+                            last = Some(event);
+                        }
                     }
                     line.clear();
-                    too_long = false;
+                }
+                if too_long {
+                    break Some(engine::too_large("An event of the answer is larger than 16 MB."));
                 }
             }
             tokio::select! {
@@ -393,6 +415,7 @@ fn forward(
                     break Some(engine::client_closed());
                 },
                 () = tokio::time::sleep_until(deadline) => break Some(timed_out()),
+                () = task_state.stopping.cancelled() => break Some(shutting_down()),
             }
         };
         let mut recorded = finish(last);
@@ -641,6 +664,14 @@ fn rebuild_form(parts: &[Part], model: &str) -> Result<reqwest::multipart::Form,
     Ok(form)
 }
 
+/// Audio files that are read at the same time. The reading runs on the blocking pool, where a
+/// client that leaves cannot stop it.
+static AUDIO_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// A file can have very many empty packets, so the reading has a time limit.
+const MAX_AUDIO_READ: Duration = Duration::from_secs(5);
+/// Audio input tokens per second of the OpenAI audio models, for estimates.
+const AUDIO_TOKENS_PER_SECOND: f64 = 10.0;
+
 /// The length of an audio file in seconds. The packet lengths are added up (no decoding),
 /// because a header can have no length (streamed WAV) or a wrong one.
 fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
@@ -648,8 +679,8 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
     use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::units::Duration;
 
+    let started = Instant::now();
     let stream = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
     let mut hint = Hint::new();
     if let Some(extension) = file_name
@@ -666,18 +697,25 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
     let (id, time_base) = (track.id, track.time_base?);
     let mut total: u64 = 0;
     while let Ok(Some(packet)) = reader.next_packet() {
+        if started.elapsed() > MAX_AUDIO_READ {
+            return None;
+        }
         if packet.track_id == id {
             total = total.saturating_add(packet.dur.get());
         }
     }
     (total > 0)
-        .then(|| time_base.calc_duration(Duration::from(total)))
+        .then(|| time_base.calc_duration(symphonia::core::units::Duration::from(total)))
         .flatten()
         .map(|time| time.as_secs_f64())
 }
 
-/// The usage of a transcription: tokens or seconds when the answer has them, else the file
-/// length.
+fn audio_estimate(seconds: Option<f64>) -> i64 {
+    seconds.map_or(0, |seconds| (seconds * AUDIO_TOKENS_PER_SECOND).ceil() as i64)
+}
+
+/// The usage of a transcription: tokens or seconds when the answer has them. Else the tokens
+/// are estimated from the file length.
 fn transcription_usage(usage: Option<&Value>, seconds: Option<f64>) -> Recorded {
     let usage = usage.filter(|u| u.is_object());
     let (tokens, seconds, status) = match usage {
@@ -697,11 +735,13 @@ fn transcription_usage(usage: Option<&Value>, seconds: Option<f64>) -> Recorded 
             };
             (tokens, seconds, "reported")
         }
-        None => (
-            Tokens::default(),
-            seconds,
-            if seconds.is_some() { "reported" } else { "estimated" },
-        ),
+        None => {
+            let tokens = Tokens {
+                input_audio: audio_estimate(seconds),
+                ..Tokens::default()
+            };
+            (tokens, seconds, "estimated")
+        }
     };
     let media = Media {
         seconds,
@@ -727,14 +767,23 @@ async fn audio_text(
             .find(|p| p.name == "file" && p.file_name.is_some())
             .ok_or_else(|| bad("The field `file` is missing."))?;
         let form = rebuild_form(&parts, &route.upstream_model)?;
-        // The use is known only after the answer: nothing is reserved, but a key over its
-        // budget waits.
-        reserve(&state, &key, 0)?;
         let (data, file_name) = (file.data.clone(), file.file_name.clone());
-        let seconds = tokio::task::spawn_blocking(move || audio_seconds(data, file_name))
-            .await
-            .ok()
-            .flatten();
+        let permit = AUDIO_READERS.acquire().await.map_err(|_| {
+            Failure::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "shutting_down",
+                "The server is stopping.",
+            )
+        })?;
+        let seconds = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            audio_seconds(data, file_name)
+        })
+        .await
+        .ok()
+        .flatten();
+        // The answer has the real use; the audio tokens are estimated from the length.
+        let reserved = reserve(&state, &key, audio_estimate(seconds))?;
         let streamed = text_part(&parts, "stream") == Some("true");
         let call = Call {
             key: key.clone(),
@@ -743,7 +792,7 @@ async fn audio_text(
             kind,
             route_name,
             streamed,
-            reserved: 0,
+            reserved,
             started: Instant::now(),
             _permits: admission,
         };
@@ -966,7 +1015,13 @@ async fn chatgpt_images(
     };
     while let Some(msg) = rx.recv().await {
         match msg {
-            Msg::Done(response) => return Json(images_answer(&response)).into_response(),
+            Msg::Done(response) => {
+                let answer = images_answer(&response);
+                if answer["data"].as_array().is_none_or(Vec::is_empty) {
+                    return error(no_image(&response));
+                }
+                return Json(answer).into_response();
+            }
             Msg::Failed(failure) => return error(failure),
             Msg::Event(_) | Msg::Raw(_) | Msg::Native(_) => {}
         }
@@ -976,6 +1031,24 @@ async fn chatgpt_images(
         "upstream_closed",
         "The request ended without an answer.",
     ))
+}
+
+/// The failure of a response without an image, with the text or refusal of the model.
+fn no_image(response: &Value) -> Failure {
+    let said: Vec<&str> = response["output"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str().or(part["refusal"].as_str()))
+        .collect();
+    let reason = response["incomplete_details"]["reason"].as_str();
+    let message = match (said.is_empty(), reason) {
+        (false, _) => format!("The model made no image: {}", said.join(" ")),
+        (true, Some(reason)) => format!("The model made no image ({reason})."),
+        (true, None) => "The model made no image.".to_owned(),
+    };
+    Failure::new(StatusCode::BAD_GATEWAY, "no_image", message)
 }
 
 /// A Responses answer with image-generation calls in the Images API shape.

@@ -298,6 +298,7 @@ pub(super) async fn attempt(
                 {
                     outcome.web_search_calls += 1;
                 }
+                outcome.note_item(item);
                 output_items.push(event.data["item"].clone());
             }
             let terminal = event.kind == "response.completed" || event.kind == "response.incomplete";
@@ -875,11 +876,11 @@ impl Tap {
                 if kind.ends_with(".delta") {
                     text(&json["delta"]);
                 }
-                if kind == "response.output_item.done"
-                    && json["item"]["type"] == "web_search_call"
-                    && json["item"]["action"]["type"] == "search"
-                {
-                    outcome.web_search_calls += 1;
+                if kind == "response.output_item.done" {
+                    if json["item"]["type"] == "web_search_call" && json["item"]["action"]["type"] == "search" {
+                        outcome.web_search_calls += 1;
+                    }
+                    outcome.note_item(&json["item"]);
                 }
                 match kind {
                     "response.completed" | "response.incomplete" => {
