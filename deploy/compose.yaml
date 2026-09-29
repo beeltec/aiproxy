@@ -33,6 +33,9 @@ services:
       - data:/data
     networks:
       - proxy
+    # Compose then stops aiproxy first, while Traefik still carries its running requests.
+    depends_on:
+      - traefik
     healthcheck:
       test: ["CMD", "/usr/local/bin/aiproxy", "healthcheck"]
       interval: 30s
@@ -64,9 +67,12 @@ services:
       - --entrypoints.websecure.address=:443
       # Uploads (images, audio) get as long as the gateway gives them.
       - --entrypoints.websecure.transport.respondingtimeouts.readtimeout=120s
+      # Running requests get as long to end as the gateway gives them at a stop.
+      - --entrypoints.websecure.transport.lifecycle.gracetimeout=35s
       - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
       - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    stop_grace_period: 40s
     ports:
       - "80:80"
       - "443:443"
