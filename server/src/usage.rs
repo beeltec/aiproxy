@@ -228,19 +228,20 @@ impl Step {
             .as_i64()
             .unwrap_or(0)
             .max(0);
-        let messages: Vec<usize> = iterations
+        let mut messages: Vec<usize> = iterations
             .iter()
-            .take(MAX_STEPS)
             .enumerate()
             .filter(|(_, iteration)| iteration["type"] == "message")
-            .map(|(index, _)| index)
+            .map(|(index, _)| index.min(MAX_STEPS - 1))
             .collect();
-        for index in &messages {
-            let tokens = &mut steps[*index].tokens;
+        messages.dedup();
+        let guessed = messages.len() > 1 && thinking > 0;
+        for index in messages {
+            let tokens = &mut steps[index].tokens;
             let moved = thinking.min(tokens.output_text);
             tokens.output_text -= moved;
             tokens.output_reasoning += moved;
-            tokens.inexact |= messages.len() > 1 && moved > 0;
+            tokens.inexact |= guessed;
             thinking -= moved;
         }
         steps
