@@ -37,6 +37,9 @@ struct Call {
     route_name: &'static str,
     streamed: bool,
     reserved: i64,
+    /// The usage known before the answer, for a row when the answer has none.
+    estimate: Tokens,
+    media: Media,
     started: Instant,
     _permits: Admission,
 }
@@ -55,6 +58,8 @@ struct Recorded {
     usage_status: &'static str,
     tokens: Tokens,
     media: Media,
+    /// The answer has no usage: the estimate of the call replaces the tokens and media.
+    unknown: bool,
 }
 
 impl Recorded {
@@ -65,6 +70,15 @@ impl Recorded {
             usage_status,
             tokens,
             media,
+            unknown: false,
+        }
+    }
+
+    /// A successful answer without usage.
+    fn unknown() -> Self {
+        Self {
+            unknown: true,
+            ..Self::ok("estimated", Tokens::default(), Media::default())
         }
     }
 
@@ -76,14 +90,15 @@ impl Recorded {
             usage_status: "none",
             tokens: Tokens::default(),
             media: Media::default(),
+            unknown: false,
         }
     }
 
-    /// A failure after the upstream accepted the work: the use is unknown, so the reservation
-    /// stays taken.
+    /// A failure after the upstream accepted the work: the use is unknown.
     fn lost(failure: &Failure) -> Self {
         Self {
             usage_status: "estimated",
+            unknown: true,
             ..Self::failed(failure)
         }
     }
@@ -121,9 +136,15 @@ fn shutting_down() -> Failure {
     )
 }
 
-async fn record(state: &AppState, call: &Call, recorded: Recorded) {
-    // Without reported usage the real use is unknown, so keep at least the reservation.
+async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
+    if recorded.unknown {
+        recorded.tokens = call.estimate.clone();
+        recorded.media = call.media.clone();
+    }
     let used = recorded.tokens.input() + recorded.tokens.output();
+    // Duration-priced audio reports no tokens; its length still counts for the limit.
+    let used = used.max(audio_estimate(recorded.media.seconds, 0));
+    // Without reported usage the real use is unknown, so keep at least the reservation.
     let used = if recorded.usage_status == "estimated" {
         used.max(call.reserved)
     } else {
@@ -336,10 +357,14 @@ fn with_content_type(mut response: Response, content_type: &str) -> Response {
     response
 }
 
+/// The last events of the SSE media answers (besides the `.completed` image events).
+const TERMINAL_EVENTS: [&str; 2] = ["speech.audio.done", "transcript.text.done"];
+
 /// Forwards a streamed answer (SSE or binary audio) as it is. `finish` gets the last SSE event
-/// that has a `usage` object (without image data) and gives the usage row, which is written
-/// when the stream ends. An SSE answer without that event, an `error` event, or another
-/// failure ends the body with an error, so the client does not take a cut answer as complete.
+/// that has a `usage` object or ends the answer (without image data) and gives the usage row,
+/// which is written when the stream ends. An SSE answer without its last event, an `error`
+/// event, or another failure ends the body with an error, so the client does not take a cut
+/// answer as complete.
 fn forward(
     state: &AppState,
     call: Call,
@@ -355,6 +380,7 @@ fn forward(
         let mut chunks = response.bytes_stream();
         let mut line = Vec::new();
         let mut last = None;
+        let mut ended = false;
         let mut upstream_error = None;
         let failure = loop {
             let next = tokio::select! {
@@ -365,8 +391,7 @@ fn forward(
             };
             let chunk = match next {
                 Ok(Some(Ok(chunk))) => chunk,
-                // Every SSE answer ends with an event that has the usage.
-                Ok(None) if sse && last.is_none() => {
+                Ok(None) if sse && !ended => {
                     break Some(upstream_error.take().unwrap_or_else(ended_early));
                 }
                 Ok(None) => break upstream_error.take(),
@@ -386,9 +411,19 @@ fn forward(
                     if pieces.peek().is_none() {
                         break;
                     }
-                    if let Some(data) = line.strip_prefix(b"data: ")
+                    let data = line
+                        .strip_suffix(b"\r")
+                        .unwrap_or(&line)
+                        .strip_prefix(b"data:")
+                        .map(|data| data.strip_prefix(b" ").unwrap_or(data));
+                    if data == Some(b"[DONE]") {
+                        ended = true;
+                    }
+                    if let Some(data) = data
                         && let Ok(mut event) = serde_json::from_slice::<Value>(data)
                     {
+                        let kind = event["type"].as_str().unwrap_or_default();
+                        ended |= TERMINAL_EVENTS.contains(&kind) || kind.ends_with(".completed");
                         if event["type"] == "error" {
                             let message = event["error"]["message"].as_str().or(event["message"].as_str());
                             upstream_error = Some(Failure::new(
@@ -397,7 +432,7 @@ fn forward(
                                 message.unwrap_or("The upstream failed.").to_owned(),
                             ));
                         }
-                        if event["usage"].is_object() {
+                        if event["usage"].is_object() || ended {
                             if let Some(event) = event.as_object_mut() {
                                 event.remove("b64_json");
                             }
@@ -474,13 +509,18 @@ pub async fn embeddings(
             route_name: "embeddings",
             streamed: false,
             reserved,
+            estimate: Tokens {
+                input_text: estimate,
+                ..Tokens::default()
+            },
+            media: Media::default(),
             started: Instant::now(),
             _permits: admission,
         };
-        Ok::<_, Failure>((call, body, estimate))
+        Ok::<_, Failure>((call, body))
     }
     .await;
-    let (call, body, estimate) = match result {
+    let (call, body) = match result {
         Ok(ok) => ok,
         Err(failure) => return error(failure),
     };
@@ -499,13 +539,16 @@ pub async fn embeddings(
             Ok(answer) => answer,
             Err(failure) => return lost(failure),
         };
-        let reported = answer["usage"]["prompt_tokens"].as_i64();
-        let tokens = Tokens {
-            input_text: reported.unwrap_or(estimate),
-            ..Tokens::default()
+        let recorded = match answer["usage"]["prompt_tokens"].as_i64() {
+            Some(input) => {
+                let tokens = Tokens {
+                    input_text: input,
+                    ..Tokens::default()
+                };
+                Recorded::ok("reported", tokens, Media::default())
+            }
+            None => Recorded::unknown(),
         };
-        let status = if reported.is_some() { "reported" } else { "estimated" };
-        let recorded = Recorded::ok(status, tokens, Media::default());
         (Json(answer).into_response(), Some(recorded))
     })
     .await
@@ -540,13 +583,21 @@ pub async fn speech(
             route_name: "audio_speech",
             streamed,
             reserved,
+            estimate: Tokens {
+                input_text: estimate,
+                ..Tokens::default()
+            },
+            media: Media {
+                characters: input.chars().count() as i64,
+                ..Media::default()
+            },
             started: Instant::now(),
             _permits: admission,
         };
-        Ok::<_, Failure>((call, body, input.chars().count() as i64, estimate))
+        Ok::<_, Failure>((call, body))
     }
     .await;
-    let (call, body, characters, estimate) = match result {
+    let (call, body) = match result {
         Ok(ok) => ok,
         Err(failure) => return error(failure),
     };
@@ -563,28 +614,17 @@ pub async fn speech(
             Err(failure) => return failed(failure),
         };
         // Binary audio has no usage; SSE ends with an event that has it.
-        let finish = move |event: Option<Value>| {
-            let media = Media {
-                characters,
-                ..Media::default()
-            };
-            match event {
-                Some(event) => {
-                    let tokens = Tokens {
-                        input_text: event["usage"]["input_tokens"].as_i64().unwrap_or(0),
-                        output_audio: event["usage"]["output_tokens"].as_i64().unwrap_or(0),
-                        ..Tokens::default()
-                    };
-                    Recorded::ok("reported", tokens, media)
-                }
-                None => {
-                    let tokens = Tokens {
-                        input_text: estimate,
-                        ..Tokens::default()
-                    };
-                    Recorded::ok("estimated", tokens, media)
-                }
+        let media = stream_call.media.clone();
+        let finish = move |event: Option<Value>| match event.filter(|e| e["usage"].is_object()) {
+            Some(event) => {
+                let tokens = Tokens {
+                    input_text: event["usage"]["input_tokens"].as_i64().unwrap_or(0),
+                    output_audio: event["usage"]["output_tokens"].as_i64().unwrap_or(0),
+                    ..Tokens::default()
+                };
+                Recorded::ok("reported", tokens, media)
             }
+            None => Recorded::unknown(),
         };
         (forward(&task_state, stream_call, response, finish), None)
     })
@@ -695,27 +735,35 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
         .ok()?;
     let track = reader.default_track(TrackType::Audio)?;
     let (id, time_base) = (track.id, track.time_base?);
-    let mut total: u64 = 0;
+    let (mut total, mut first, mut end) = (0_u64, i64::MAX, i64::MIN);
     while let Ok(Some(packet)) = reader.next_packet() {
         if started.elapsed() > MAX_AUDIO_READ {
             return None;
         }
         if packet.track_id == id {
-            total = total.saturating_add(packet.dur.get());
+            let (pts, dur) = (packet.pts.get(), packet.dur.get());
+            total = total.saturating_add(dur);
+            first = first.min(pts);
+            end = end.max(pts.saturating_add(i64::try_from(dur).unwrap_or(i64::MAX)));
         }
     }
+    // WebM blocks can have no durations, but their timestamps move on.
+    let span = u64::try_from(end.saturating_sub(first)).unwrap_or(0);
+    let total = total.max(span);
     (total > 0)
         .then(|| time_base.calc_duration(symphonia::core::units::Duration::from(total)))
         .flatten()
         .map(|time| time.as_secs_f64())
 }
 
-fn audio_estimate(seconds: Option<f64>) -> i64 {
-    seconds.map_or(0, |seconds| (seconds * AUDIO_TOKENS_PER_SECOND).ceil() as i64)
+/// Estimated audio tokens. Without a length, the file size at a low bit rate (16 kbit/s) gives
+/// one, so a file that cannot be read still counts.
+fn audio_estimate(seconds: Option<f64>, bytes: usize) -> i64 {
+    let seconds = seconds.unwrap_or(bytes as f64 / 2_000.0);
+    (seconds * AUDIO_TOKENS_PER_SECOND).ceil() as i64
 }
 
-/// The usage of a transcription: tokens or seconds when the answer has them. Else the tokens
-/// are estimated from the file length.
+/// The usage of a transcription when the answer has it: tokens or seconds.
 fn transcription_usage(usage: Option<&Value>, seconds: Option<f64>) -> Recorded {
     let usage = usage.filter(|u| u.is_object());
     let (tokens, seconds, status) = match usage {
@@ -735,13 +783,7 @@ fn transcription_usage(usage: Option<&Value>, seconds: Option<f64>) -> Recorded 
             };
             (tokens, seconds, "reported")
         }
-        None => {
-            let tokens = Tokens {
-                input_audio: audio_estimate(seconds),
-                ..Tokens::default()
-            };
-            (tokens, seconds, "estimated")
-        }
+        None => return Recorded::unknown(),
     };
     let media = Media {
         seconds,
@@ -767,14 +809,9 @@ async fn audio_text(
             .find(|p| p.name == "file" && p.file_name.is_some())
             .ok_or_else(|| bad("The field `file` is missing."))?;
         let form = rebuild_form(&parts, &route.upstream_model)?;
-        let (data, file_name) = (file.data.clone(), file.file_name.clone());
-        let permit = AUDIO_READERS.acquire().await.map_err(|_| {
-            Failure::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "shutting_down",
-                "The server is stopping.",
-            )
-        })?;
+        let (data, file_name, bytes) = (file.data.clone(), file.file_name.clone(), file.data.len());
+        // The semaphore is never closed.
+        let permit = AUDIO_READERS.acquire().await.map_err(|_| shutting_down())?;
         let seconds = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             audio_seconds(data, file_name)
@@ -783,7 +820,8 @@ async fn audio_text(
         .ok()
         .flatten();
         // The answer has the real use; the audio tokens are estimated from the length.
-        let reserved = reserve(&state, &key, audio_estimate(seconds))?;
+        let estimate = audio_estimate(seconds, bytes);
+        let reserved = reserve(&state, &key, estimate)?;
         let streamed = text_part(&parts, "stream") == Some("true");
         let call = Call {
             key: key.clone(),
@@ -793,6 +831,14 @@ async fn audio_text(
             route_name,
             streamed,
             reserved,
+            estimate: Tokens {
+                input_audio: estimate,
+                ..Tokens::default()
+            },
+            media: Media {
+                seconds,
+                ..Media::default()
+            },
             started: Instant::now(),
             _permits: admission,
         };
@@ -874,12 +920,18 @@ pub async fn translations(
 
 /// The usage of an Images API answer or of a completed stream event. Older models do not
 /// return the size and quality, so the requested values are used then.
-fn image_usage(answer: &Value, images: i64, size: Option<&str>, quality: Option<&str>) -> Recorded {
+fn image_usage(answer: &Value, images: i64, requested: &Media) -> Recorded {
     let usage = &answer["usage"];
     let media = Media {
         images_generated: images,
-        image_size: answer["size"].as_str().or(size).map(str::to_owned),
-        image_quality: answer["quality"].as_str().or(quality).map(str::to_owned),
+        image_size: answer["size"]
+            .as_str()
+            .map(str::to_owned)
+            .or(requested.image_size.clone()),
+        image_quality: answer["quality"]
+            .as_str()
+            .map(str::to_owned)
+            .or(requested.image_quality.clone()),
         ..Media::default()
     };
     if usage.is_object() {
@@ -890,14 +942,7 @@ fn image_usage(answer: &Value, images: i64, size: Option<&str>, quality: Option<
 }
 
 /// Sends an Images API request to an OpenAI connection. Streams (`stream: true`) pass through.
-async fn native_images(
-    state: &AppState,
-    call: Call,
-    path: &'static str,
-    body: ImageBody,
-    size: Option<String>,
-    quality: Option<String>,
-) -> Response {
+async fn native_images(state: &AppState, call: Call, path: &'static str, body: ImageBody) -> Response {
     let task_state = state.clone();
     let stream_call = call.clone();
     detached(state, call, async move {
@@ -915,11 +960,12 @@ async fn native_images(
         };
         if stream_call.streamed {
             // A stream makes one image; its `completed` event has the usage.
+            let requested = stream_call.media.clone();
             let finish = move |event: Option<Value>| {
                 let completed = event.filter(|e| e["type"].as_str().is_some_and(|t| t.ends_with(".completed")));
                 match completed {
-                    Some(event) => image_usage(&event, 1, size.as_deref(), quality.as_deref()),
-                    None => Recorded::ok("estimated", Tokens::default(), Media::default()),
+                    Some(event) => image_usage(&event, 1, &requested),
+                    None => Recorded::unknown(),
                 }
             };
             return (forward(&task_state, stream_call, response, finish), None);
@@ -927,7 +973,7 @@ async fn native_images(
         match read_json(response).await {
             Ok(answer) => {
                 let images = answer["data"].as_array().map_or(0, |data| data.len() as i64);
-                let recorded = image_usage(&answer, images, size.as_deref(), quality.as_deref());
+                let recorded = image_usage(&answer, images, &stream_call.media);
                 (Json(answer).into_response(), Some(recorded))
             }
             Err(failure) => lost(failure),
@@ -1098,27 +1144,33 @@ pub async fn image_generations(
             return error(bad("Images work only with ChatGPT models and OpenAI connections."));
         }
     };
-    let estimate = crate::tokens::estimate(&body["prompt"]).await as i64 + request::DEFAULT_OUTPUT_RESERVE;
-    let reserved = match reserve(&state, &key, estimate) {
+    let estimate = crate::tokens::estimate(&body["prompt"]).await as i64;
+    let reserved = match reserve(&state, &key, estimate + request::DEFAULT_OUTPUT_RESERVE) {
         Ok(reserved) => reserved,
         Err(failure) => return error(failure),
     };
     body["model"] = json!(route.upstream_model);
-    let size = body["size"].as_str().map(str::to_owned);
-    let quality = body["quality"].as_str().map(str::to_owned);
-    let streamed = body["stream"] == true;
     let call = Call {
         key,
         route,
         connection_id,
         kind,
         route_name: "images",
-        streamed,
+        streamed: body["stream"] == true,
         reserved,
+        estimate: Tokens {
+            input_text: estimate,
+            ..Tokens::default()
+        },
+        media: Media {
+            image_size: body["size"].as_str().map(str::to_owned),
+            image_quality: body["quality"].as_str().map(str::to_owned),
+            ..Media::default()
+        },
         started: Instant::now(),
         _permits: admission,
     };
-    native_images(&state, call, "images/generations", ImageBody::Json(body), size, quality).await
+    native_images(&state, call, "images/generations", ImageBody::Json(body)).await
 }
 
 /// The Images API fields of a ChatGPT edit form, with the JSON types of the tool.
@@ -1197,25 +1249,32 @@ pub async fn image_edits(
             };
             let field = |name: &str| text_part(&parts, name).map(str::to_owned);
             let prompt = field("prompt").unwrap_or_default();
-            let estimate = crate::tokens::estimate(&json!(prompt)).await as i64 + request::DEFAULT_OUTPUT_RESERVE;
-            let reserved = match reserve(&state, &key, estimate) {
+            let estimate = crate::tokens::estimate(&json!(prompt)).await as i64;
+            let reserved = match reserve(&state, &key, estimate + request::DEFAULT_OUTPUT_RESERVE) {
                 Ok(reserved) => reserved,
                 Err(failure) => return error(failure),
             };
-            let streamed = field("stream").as_deref() == Some("true");
-            let (size, quality) = (field("size"), field("quality"));
             let call = Call {
                 key,
                 route,
                 connection_id: id,
                 kind: Kind::OpenAi,
                 route_name: "images",
-                streamed,
+                streamed: field("stream").as_deref() == Some("true"),
                 reserved,
+                estimate: Tokens {
+                    input_text: estimate,
+                    ..Tokens::default()
+                },
+                media: Media {
+                    image_size: field("size"),
+                    image_quality: field("quality"),
+                    ..Media::default()
+                },
                 started: Instant::now(),
                 _permits: admission,
             };
-            native_images(&state, call, "images/edits", ImageBody::Form(form), size, quality).await
+            native_images(&state, call, "images/edits", ImageBody::Form(form)).await
         }
         Upstream::Connection { .. } => error(bad("Images work only with ChatGPT models and OpenAI connections.")),
     }
