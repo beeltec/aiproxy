@@ -171,6 +171,46 @@ fn direct_search(tool: &mut Value) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Content blocks that native requests may carry. Other blocks (for example inline tool
+/// definitions of newer betas, containers or MCP results) could add hosted tools or other
+/// models without the gateway's checks.
+const NATIVE_BLOCKS: [&str; 10] = [
+    "text",
+    "image",
+    "document",
+    "search_result",
+    "tool_use",
+    "tool_result",
+    "thinking",
+    "redacted_thinking",
+    "server_tool_use",
+    "web_search_tool_result",
+];
+
+fn check_native_blocks(body: &Value) -> Result<(), Failure> {
+    for message in body["messages"].as_array().into_iter().flatten() {
+        for block in message["content"].as_array().into_iter().flatten() {
+            let kind = block["type"].as_str().unwrap_or_default();
+            let known = NATIVE_BLOCKS.contains(&kind) && (kind != "server_tool_use" || block["name"] == "web_search");
+            if !known {
+                return Err(bad(format!("The content block `{kind}` is not supported.")));
+            }
+            let nested = block["content"].as_array().into_iter().flatten();
+            for inner in nested.filter(|_| kind == "tool_result") {
+                if !matches!(
+                    inner["type"].as_str(),
+                    Some("text" | "image" | "document" | "search_result")
+                ) {
+                    return Err(bad(
+                        "A tool result can hold only text, image, document and search result blocks.",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Adjusts a native Messages body: web search callers, alias defaults and fast mode. Returns
 /// the beta headers to add.
 pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Value) -> Result<Vec<String>, Failure> {
@@ -196,6 +236,7 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             direct_search(tool)?;
         }
     }
+    check_native_blocks(body)?;
     // Thinking that the gateway made from OpenAI reasoning has no Anthropic signature.
     for message in body
         .get_mut("messages")
@@ -240,9 +281,21 @@ pub fn prepare_native(body: &mut Value, alias: Option<&Alias>, capabilities: &Va
             body["speed"] = json!("fast");
         }
     }
-    // An explicit effort also changes to what the model supports.
+    // An explicit effort also changes to what the model supports. A model without efforts
+    // gets the thinking budget of that effort instead.
     if let Some(effort) = body["output_config"]["effort"].as_str().map(str::to_owned) {
-        body["output_config"]["effort"] = json!(anthropic_effort(&effort, capabilities));
+        if capabilities["efforts"].as_array().is_some_and(Vec::is_empty) {
+            if let Some(config) = body["output_config"].as_object_mut() {
+                config.remove("effort");
+            }
+            if body["thinking"].is_null() {
+                let client_max = body["max_tokens"].as_i64();
+                apply_effort(body, &effort, client_max, capabilities);
+                drop_sampling_with_thinking(body);
+            }
+        } else {
+            body["output_config"]["effort"] = json!(anthropic_effort(&effort, capabilities));
+        }
     }
     drop_thinking_for_forced_tools(body, capabilities).map_err(bad)?;
     // A model without fast mode rejects `speed`; it answers at normal speed instead.

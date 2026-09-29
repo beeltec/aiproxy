@@ -325,14 +325,32 @@ fn job_messages(body: &Value) -> Vec<Value> {
     body["messages"].as_array().cloned().unwrap_or_default()
 }
 
-/// The beta headers of the gateway plus the ones of an Anthropic client (for native requests).
+/// Betas that turn on hosted tools, stored objects or other models under the shared key.
+const BLOCKED_BETAS: [&str; 13] = [
+    "code-execution",
+    "mcp-client",
+    "mcp-tunnels",
+    "files-api",
+    "inline-tools",
+    "advisor-tool",
+    "skills",
+    "managed-agents",
+    "agent-memory",
+    "server-side-fallback",
+    "fallback-credit",
+    "user-profiles",
+    "dreaming",
+];
+
+/// The beta headers of the gateway plus the allowed ones of an Anthropic client (for native
+/// requests).
 fn merge_betas(mut betas: Vec<String>, client: Option<&str>, kind: Kind) -> Vec<String> {
     if kind == Kind::Anthropic {
         for beta in client
             .into_iter()
             .flat_map(|b| b.split(','))
             .map(str::trim)
-            .filter(|b| !b.is_empty())
+            .filter(|b| !b.is_empty() && !BLOCKED_BETAS.iter().any(|blocked| b.starts_with(blocked)))
         {
             if !betas.iter().any(|b| b == beta) {
                 betas.push(beta.to_owned());
