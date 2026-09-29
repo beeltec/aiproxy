@@ -17,7 +17,7 @@ use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Row, Tokens};
+use crate::usage::{Media, Row, Tokens};
 
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -563,15 +563,20 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     let mut tokens = tokens;
     tokens.inexact |= outcome.searches_uncounted;
+    let image_tool = response.and_then(image_tool_usage);
     // Without reported usage the real use is unknown, so keep at least the reservation.
+    let image_tokens = image_tool
+        .as_ref()
+        .map_or(0, |(_, tokens, _, _)| tokens.input() + tokens.output());
     let used = match usage_status {
         "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
         _ => tokens.input() + tokens.output(),
-    };
+    } + image_tokens;
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
     let row = Row {
         request_id: random_token(12),
+        component: "model",
         time: now(),
         api_key_id: job.key.id,
         route: job.route_name,
@@ -603,8 +608,75 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         tokens,
         web_search_calls: outcome.web_search_calls,
         failover_attempts: (outcome.attempts - 1).max(0),
+        media: Media {
+            input_images: input_images(&job.body["input"]),
+            ..Media::default()
+        },
     };
+    // The image tool is its own billing component: the image model with its own tokens.
+    let image_row = image_tool.map(|(model, tokens, usage_status, media)| Row {
+        component: "image_tool",
+        resolved_model: Some(model),
+        effort: None,
+        service_tier_requested: None,
+        service_tier_reported: None,
+        first_token_ms: None,
+        usage_status,
+        tokens,
+        web_search_calls: 0,
+        failover_attempts: 0,
+        media,
+        ..row.clone()
+    });
     state.usage.record(row).await;
+    if let Some(image_row) = image_row {
+        state.usage.record(image_row).await;
+    }
+}
+
+/// Images in the request input (content parts and tool outputs).
+fn input_images(input: &Value) -> i64 {
+    let parts = |item: &Value| {
+        ["content", "output"]
+            .iter()
+            .flat_map(|field| item[*field].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "input_image")
+            .count()
+    };
+    input.as_array().into_iter().flatten().map(parts).sum::<usize>() as i64
+}
+
+/// The image-generation tool component of a response: the image model, its tokens, the usage
+/// status and the images. `None` when the response has no image-generation call.
+fn image_tool_usage(response: &Value) -> Option<(String, Tokens, &'static str, Media)> {
+    let calls: Vec<&Value> = response["output"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "image_generation_call")
+        .collect();
+    let first = calls.first()?;
+    let usage = &response["tool_usage"]["image_gen"];
+    let (tokens, usage_status) = if usage.is_object() {
+        (Tokens::from_image(usage, false), "reported")
+    } else {
+        (Tokens::default(), "estimated")
+    };
+    let model = response["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|tool| tool["type"] == "image_generation")
+        .and_then(|tool| tool["model"].as_str())
+        .unwrap_or("image_generation")
+        .to_owned();
+    let media = Media {
+        images_generated: calls.iter().filter(|call| call["result"].is_string()).count() as i64,
+        image_size: first["size"].as_str().map(str::to_owned),
+        image_quality: first["quality"].as_str().map(str::to_owned),
+        ..Media::default()
+    };
+    Some((model, tokens, usage_status, media))
 }
 
 fn db_failure(err: &sqlx::Error) -> Failure {

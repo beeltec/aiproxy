@@ -133,6 +133,7 @@ pub async fn count_tokens(
         .usage
         .record(Row {
             request_id: crate::crypto::random_token(12),
+            component: "model",
             time: now(),
             api_key_id: key.id,
             route: "count_tokens",
@@ -155,6 +156,7 @@ pub async fn count_tokens(
             tokens: Tokens::default(),
             web_search_calls: 0,
             failover_attempts: 0,
+            media: Default::default(),
         })
         .await;
     match result {
