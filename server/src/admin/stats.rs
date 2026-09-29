@@ -129,25 +129,30 @@ fn buckets(from: i64, to: i64, tz: Tz, size: &str) -> Vec<i64> {
         }
         fits
     };
-    // An hour bucket starts at each local full hour. The candidates step a quarter hour in
-    // real time, so a repeated hour at a clock change is its own bucket, and a clock change of
-    // 30 minutes keeps the local borders.
     // An hour bucket starts at each local full hour. A repeated hour at a clock change gives
-    // two buckets; an hour in a clock change gap has none.
+    // two buckets; an hour in a gap has none. The local hours start a few hours early, so a
+    // range that starts in a repeated hour has all its borders; the borders are then sorted
+    // in real time.
     if size == "hour" {
-        let mut hour = date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start);
+        let mut hour = date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start) - Duration::hours(3);
+        let mut borders = Vec::new();
         for _ in 0..MAX_BUCKETS * 2 {
-            let times = match tz.from_local_datetime(&hour) {
-                LocalResult::Single(t) => vec![t.timestamp()],
-                LocalResult::Ambiguous(first, second) => vec![first.timestamp(), second.timestamp()],
-                LocalResult::None => Vec::new(),
-            };
-            for at in times.into_iter().filter(|at| *at > from) {
-                if !push(at) {
-                    return out;
-                }
+            match tz.from_local_datetime(&hour) {
+                LocalResult::Single(t) => borders.push(t.timestamp()),
+                LocalResult::Ambiguous(first, second) => borders.extend([first.timestamp(), second.timestamp()]),
+                LocalResult::None => {}
+            }
+            // Clock changes are at most a few hours.
+            if borders.last().is_some_and(|at| *at >= to + 4 * 3600) {
+                break;
             }
             hour += Duration::hours(1);
+        }
+        borders.sort_unstable();
+        for at in borders.into_iter().filter(|at| *at > from) {
+            if !push(at) {
+                break;
+            }
         }
         return out;
     }
