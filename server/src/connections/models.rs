@@ -110,7 +110,15 @@ async fn load(state: &AppState, connection_id: i64) -> anyhow::Result<Vec<Listed
         }
         Kind::OpenRouter => {
             let list = get(state, &connection, "models").await?;
+            // Embedding models have their own list. Without it, the other models still sync.
+            let embeddings = get(state, &connection, "embeddings/models")
+                .await
+                .inspect_err(
+                    |err| tracing::warn!(connection = connection_id, error = %err, "cannot load the embedding models"),
+                )
+                .unwrap_or_default();
             Ok(entries(&list)
+                .chain(entries(&embeddings))
                 .filter_map(|model| {
                     Some(Listed {
                         id: model["id"].as_str()?.to_owned(),
@@ -314,6 +322,10 @@ fn openrouter_capabilities(model: &Value) -> Value {
             "efforts".into(),
             json!(["none", "minimal", "low", "medium", "high", "xhigh"]),
         );
+    }
+    let outputs = model["architecture"]["output_modalities"].as_array();
+    if outputs.is_some_and(|o| o.iter().any(|v| v == "embeddings")) {
+        out.insert("mode".into(), json!("embedding"));
     }
     if let Some(context) = model["context_length"].as_i64() {
         out.insert("context_window".into(), json!(context));
