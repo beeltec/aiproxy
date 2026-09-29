@@ -53,10 +53,20 @@ fn some(prices: TokenPrices) -> Option<TokenPrices> {
     (!prices.is_empty()).then_some(prices)
 }
 
-fn litellm_prices(entry: &Value) -> Prices {
+/// The `web_search` price of OpenAI, per call. The preview tool costs the same on reasoning
+/// models and more on the others.
+const OPENAI_WEB_SEARCH: f64 = 0.01;
+
+fn litellm_prices(provider: &str, entry: &Value) -> Prices {
     let search = &entry["search_context_cost_per_query"];
     let search = number(&search["search_context_size_medium"])
         .or_else(|| search.as_object().and_then(|o| o.values().find_map(number)));
+    // LiteLLM has one search price per model: for OpenAI it is the price of the preview tool;
+    // the `web_search` price is known only when both are the same.
+    let (web_search, web_search_preview) = match provider {
+        "openai" => (search.filter(|usd| (usd - OPENAI_WEB_SEARCH).abs() < 1e-12), search),
+        _ => (search, None),
+    };
     let context_tiers = LITELLM_LIMITS
         .iter()
         .filter_map(|limit| {
@@ -85,13 +95,13 @@ fn litellm_prices(entry: &Value) -> Prices {
         fast_multiplier: number(&specific["fast"]),
         fast: None,
         geo,
-        // LiteLLM has one search price; it is used for both search tools.
-        web_search: search,
-        web_search_preview: search,
+        web_search,
+        web_search_preview,
         images: Vec::new(),
         per_character: number(&entry["input_cost_per_character"]),
         per_second: number(&entry["input_cost_per_second"]),
         partial: !entry["off_peak_pricing"].is_null() || !entry["tiered_pricing"].is_null(),
+        variable: false,
     }
 }
 
@@ -117,7 +127,7 @@ pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
         };
         if provider == "openrouter" {
             if key.starts_with("openrouter/") {
-                out.insert(key.clone(), litellm_prices(entry));
+                out.insert(key.clone(), litellm_prices(provider, entry));
             }
             continue;
         }
@@ -136,7 +146,7 @@ pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
         if key.contains('/') || key.contains(':') {
             continue;
         }
-        out.insert(format!("{provider}/{key}"), litellm_prices(entry));
+        out.insert(format!("{provider}/{key}"), litellm_prices(provider, entry));
     }
     for (key, price) in images {
         out.entry(key).or_default().images.push(price);
@@ -144,9 +154,20 @@ pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
     out
 }
 
+/// USD per token from USD per 1M tokens, rounded to 10 digits (the division leaves float
+/// noise such as `2.0000000000000002e-7`).
+fn per_token(per_million: f64) -> f64 {
+    let usd = per_million / 1e6;
+    if usd == 0.0 {
+        return 0.0;
+    }
+    let scale = 10f64.powi(10 - usd.abs().log10().ceil() as i32);
+    (usd * scale).round() / scale
+}
+
 /// models.dev costs are USD per 1M tokens.
 fn models_dev_tokens(cost: &Value) -> TokenPrices {
-    let field = |name: &str| number(&cost[name]).map(|usd| usd / 1e6);
+    let field = |name: &str| number(&cost[name]).map(per_token);
     TokenPrices {
         input_text: field("input"),
         input_text_cached: field("cache_read"),
@@ -233,7 +254,7 @@ fn openrouter_tokens(pricing: &Value) -> TokenPrices {
 }
 
 /// OpenRouter model lists (chat and embedding models). `-1` means a price that changes per
-/// request; such models have no price.
+/// request; such models get a variable price, so that no other list prices them.
 pub fn parse_openrouter(lists: &[Value]) -> BTreeMap<String, Prices> {
     let mut out = BTreeMap::new();
     for model in lists
@@ -244,6 +265,11 @@ pub fn parse_openrouter(lists: &[Value]) -> BTreeMap<String, Prices> {
             continue;
         };
         if pricing["prompt"] == "-1" || pricing["completion"] == "-1" {
+            let prices = Prices {
+                variable: true,
+                ..Prices::default()
+            };
+            out.insert(format!("openrouter/{id}"), prices);
             continue;
         }
         let mut partial = false;

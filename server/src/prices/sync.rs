@@ -58,58 +58,67 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
     // The capability checks use the same lists.
     catalog::store(state, models_dev.as_ref().ok(), litellm.as_ref().ok());
 
-    // Without the embedding list, the chat models still get their prices, but no price ends.
-    let complete_openrouter = embeddings.is_ok();
+    // Without the embedding list, the chat models still get their prices, but no price ends
+    // and the status shows the error.
+    let embeddings_error = embeddings
+        .as_ref()
+        .err()
+        .map(|err| format!("The embedding model list failed: {err:#}"));
     let openrouter = openrouter.map(|models| {
         let mut lists = vec![models];
-        match embeddings {
-            Ok(embeddings) => lists.push(embeddings),
-            Err(err) => tracing::warn!(error = %err, "cannot load the OpenRouter embedding models"),
-        }
+        lists.extend(embeddings.ok());
         lists
     });
     let parsed = [
-        ("litellm", litellm.map(|list| sources::parse_litellm(&list)), true),
+        ("litellm", litellm.map(|list| sources::parse_litellm(&list)), None),
         (
             "models_dev",
             models_dev.map(|list| sources::parse_models_dev(&list)),
-            true,
+            None,
         ),
         (
             "openrouter",
             openrouter.map(|lists| sources::parse_openrouter(&lists)),
-            complete_openrouter,
+            embeddings_error,
         ),
     ];
-    for (source, prices, complete) in parsed {
+    for (source, prices, partial_error) in parsed {
         match prices {
             Ok(prices) => {
-                let changed = save(&state.db, source, &prices, complete).await?;
+                let changed = save(&state.db, source, &prices, partial_error.is_none()).await?;
                 tracing::info!(source, models = prices.len(), changed, "price list loaded");
-                set_status(&state.db, source, None, prices.len()).await?;
+                if let Some(error) = &partial_error {
+                    tracing::warn!(source, error, "a part of a price list failed");
+                }
+                set_status(&state.db, source, partial_error.as_deref(), Some(prices.len())).await?;
             }
             Err(err) => {
                 tracing::warn!(source, error = %err, "cannot load a price list");
-                set_status(&state.db, source, Some(&format!("{err:#}")), 0).await?;
+                set_status(&state.db, source, Some(&format!("{err:#}")), None).await?;
             }
         }
     }
     state.prices.reload(&state.db).await
 }
 
-async fn set_status(db: &SqlitePool, source: &str, error: Option<&str>, entries: usize) -> Result<(), sqlx::Error> {
-    // A failed list keeps the count of its last good list.
+/// `entries` is the count of saved prices; a list that failed (`None`) keeps its last count.
+async fn set_status(
+    db: &SqlitePool,
+    source: &str,
+    error: Option<&str>,
+    entries: Option<usize>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO price_sources (source, fetched_at, status, error, entries) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO price_sources (source, fetched_at, status, error, entries)
+         VALUES (?1, ?2, ?3, ?4, COALESCE(?5, 0))
          ON CONFLICT (source) DO UPDATE SET fetched_at = excluded.fetched_at, status = excluded.status,
-             error = excluded.error,
-             entries = CASE WHEN excluded.status = 'ok' THEN excluded.entries ELSE price_sources.entries END",
+             error = excluded.error, entries = COALESCE(?5, price_sources.entries)",
     )
     .bind(source)
     .bind(now())
     .bind(if error.is_some() { "error" } else { "ok" })
     .bind(error)
-    .bind(entries as i64)
+    .bind(entries.map(|n| n as i64))
     .execute(db)
     .await?;
     Ok(())

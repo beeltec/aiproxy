@@ -134,6 +134,10 @@ pub struct Prices {
     /// prices), so costs from it are not complete.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// The price changes per request (OpenRouter routers): the cost is unknown, and no other
+    /// list is used for the model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub variable: bool,
 }
 
 impl Prices {
@@ -473,6 +477,9 @@ fn nano(usd: f64) -> i64 {
 
 /// The cost of a usage row with the prices of one version.
 pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
+    if prices.variable {
+        return Cost::default();
+    }
     let mut complete = input.usage_status != "estimated" && input.usage_exact && !prices.partial;
     let mut parts = BTreeMap::new();
     let tokens = input.tokens();
@@ -487,41 +494,38 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
             "standard"
         }
     };
-    let pick = |standard: &TokenPrices, priority: &Option<TokenPrices>, flex: &Option<TokenPrices>| match tier {
+    let tiered = |priority: &Option<TokenPrices>, flex: &Option<TokenPrices>| match tier {
         "priority" => priority.as_ref().map(TokenPrices::values),
         "flex" => flex.as_ref().map(TokenPrices::values),
-        _ => Some(standard.values()),
+        _ => None,
     };
-    // A tier price that is missing uses the standard price; the cost is then not complete.
-    let mut effective = prices.standard.values();
-    let mut from_standard = [false; 12];
-    if tier != "standard" {
-        let tier_values = pick(&prices.standard, &prices.priority, &prices.flex).unwrap_or([None; 12]);
-        for category in 0..12 {
-            match tier_values[category] {
-                Some(price) => effective[category] = Some(price),
-                None => from_standard[category] = true,
-            }
-        }
-    }
-    // The whole request uses the prices of the highest context tier that its input is above.
-    // A price that the tier does not list stays as below the limit.
+    // Layers: the base prices, then each context tier that the input is above, from low to
+    // high (the whole request uses the prices of the tiers it is above). A layer changes only
+    // the prices it lists. In a layer, a tier price that is missing uses the standard price of
+    // the layer; the cost is then not complete.
     let input_total: i64 = tokens[..8].iter().sum();
-    let context = prices
-        .context_tiers
-        .iter()
-        .filter(|t| input_total > t.above)
-        .max_by_key(|t| t.above);
-    if let Some(context) = context {
-        // The tier's own prices above the limit, else the standard ones (then not complete).
-        let (values, exact) = match pick(&context.standard, &context.priority, &context.flex) {
-            Some(values) => (values, true),
-            None => (context.standard.values(), false),
-        };
+    let mut contexts: Vec<&ContextTier> = prices.context_tiers.iter().filter(|t| input_total > t.above).collect();
+    contexts.sort_by_key(|t| t.above);
+    let mut layers = vec![(prices.standard.values(), tiered(&prices.priority, &prices.flex))];
+    layers.extend(
+        contexts
+            .iter()
+            .map(|t| (t.standard.values(), tiered(&t.priority, &t.flex))),
+    );
+    let mut effective = [None; 12];
+    let mut from_standard = [false; 12];
+    for (standard, tier_values) in layers {
         for category in 0..12 {
-            if let Some(price) = values[category] {
-                effective[category] = Some(price);
-                from_standard[category] = !exact;
+            match (tier_values.and_then(|values| values[category]), standard[category]) {
+                (Some(price), _) => {
+                    effective[category] = Some(price);
+                    from_standard[category] = false;
+                }
+                (None, Some(price)) => {
+                    effective[category] = Some(price);
+                    from_standard[category] = tier != "standard";
+                }
+                (None, None) => {}
             }
         }
     }
