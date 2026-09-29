@@ -98,6 +98,10 @@ pub trait Decoder: Send {
     fn extras(&self) -> Extras {
         Extras::default()
     }
+    /// The sampling steps, when the answer had more than one (Anthropic).
+    fn steps(&self) -> Vec<Tokens> {
+        Vec::new()
+    }
     /// The complete upstream content of the answer (Anthropic blocks).
     fn assistant_content(&self) -> &[Value] {
         &[]
@@ -233,6 +237,7 @@ pub(super) async fn attempt(
                 // The usage of the answers so far is kept, also if the continuation fails.
                 outcome.tokens = decoder.tokens();
                 outcome.extras = decoder.extras();
+                outcome.steps = decoder.steps();
                 let left = client_max.map(|max| max - decoder.output_tokens());
                 let content = (continuations < MAX_CONTINUATIONS && left.is_none_or(|l| l > 0))
                     .then(|| decoder.continuation())
@@ -284,6 +289,7 @@ pub(super) async fn attempt(
                 if continuations > 0 {
                     outcome.tokens = decoder.tokens();
                     outcome.extras = decoder.extras();
+                    outcome.steps = decoder.steps();
                 }
             }
         }
@@ -316,6 +322,7 @@ pub(super) async fn attempt(
                 outcome.final_response = Some(event.data["response"].clone());
                 outcome.tokens = decoder.tokens();
                 outcome.extras = decoder.extras();
+                outcome.steps = decoder.steps();
                 if job.client_format == "chat" {
                     state.thinking_cache.store(job.key.id, decoder.assistant_content());
                 }
@@ -828,7 +835,8 @@ fn record_native(wire: Wire, answer: &Value, ttl: Option<&str>, outcome: &mut Ou
         Wire::Messages => {
             outcome.service_tier = answer["usage"]["service_tier"].as_str().map(str::to_owned);
             if answer["usage"].is_object() {
-                outcome.tokens = Some(Tokens::from_anthropic(&answer["usage"], ttl));
+                outcome.steps = Tokens::anthropic_steps(&answer["usage"], ttl);
+                outcome.tokens = Some(Tokens::sum(&outcome.steps));
                 outcome.extras = Extras::from_usage(&answer["usage"]);
                 outcome.web_search_calls = answer["usage"]["server_tool_use"]["web_search_requests"]
                     .as_i64()
@@ -951,7 +959,8 @@ impl Tap {
                                 self.anthropic_usage[key] = value.clone();
                             }
                         }
-                        outcome.tokens = Some(Tokens::from_anthropic(&self.anthropic_usage, ttl));
+                        outcome.steps = Tokens::anthropic_steps(&self.anthropic_usage, ttl);
+                        outcome.tokens = Some(Tokens::sum(&outcome.steps));
                         outcome.extras = Extras::from_usage(&self.anthropic_usage);
                         outcome.web_search_calls = self.anthropic_usage["server_tool_use"]["web_search_requests"]
                             .as_i64()

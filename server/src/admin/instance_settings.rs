@@ -1,4 +1,4 @@
-//! The Settings page: time zone, token refresh plan, failover.
+//! The Settings page: time zone, token refresh plan, failover, price sync plan.
 
 use axum::Json;
 use axum::extract::State;
@@ -35,9 +35,11 @@ async fn put_settings(
 ) -> ApiResult<Json<Settings>> {
     req.time_zone = req.time_zone.trim().to_owned();
     req.refresh.cron = req.refresh.cron.split_whitespace().collect::<Vec<_>>().join(" ");
+    req.price_sync.cron = req.price_sync.cron.split_whitespace().collect::<Vec<_>>().join(" ");
     req.validate().map_err(ApiError::bad_request)?;
     settings::save(&state.db, &req).await?;
     state.schedule_changed.notify_one();
+    state.price_schedule_changed.notify_one();
     Ok(Json(req))
 }
 

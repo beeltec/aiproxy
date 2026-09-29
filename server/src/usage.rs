@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
+
+use crate::prices::{Cost, CostInput, PriceCache};
 use tokio::sync::{mpsc, oneshot};
 
 /// Token counts as billing categories that do not overlap.
@@ -90,6 +92,38 @@ impl Tokens {
             inexact,
             ..Self::default()
         }
+    }
+
+    /// The sampling steps of an Anthropic answer. With `iterations` (compaction), each step
+    /// has its own usage, and the top-level usage leaves some steps out. Without them, the
+    /// answer is one step.
+    pub fn anthropic_steps(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
+        match usage["iterations"].as_array().filter(|steps| !steps.is_empty()) {
+            Some(steps) => steps.iter().map(|step| Self::from_anthropic(step, ttl)).collect(),
+            None => vec![Self::from_anthropic(usage, ttl)],
+        }
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.input_text += other.input_text;
+        self.input_text_cached += other.input_text_cached;
+        self.input_audio += other.input_audio;
+        self.input_audio_cached += other.input_audio_cached;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.input_image += other.input_image;
+        self.input_image_cached += other.input_image_cached;
+        self.output_text += other.output_text;
+        self.output_reasoning += other.output_reasoning;
+        self.output_audio += other.output_audio;
+        self.output_image += other.output_image;
+        self.inexact |= other.inexact;
+    }
+
+    pub fn sum(steps: &[Self]) -> Self {
+        let mut total = Self::default();
+        steps.iter().for_each(|step| total.add(step));
+        total
     }
 
     /// Splits the usage of an image model (Images API, image-generation tool). Without cache
@@ -193,7 +227,8 @@ pub struct Media {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub request_id: String,
-    /// `model`, or `image_tool` for the second row of a request that used the image tool.
+    /// `model`; `iteration` for each further sampling step of an Anthropic answer; `image_tool`
+    /// for the image-generation tool.
     pub component: &'static str,
     pub time: i64,
     pub api_key_id: i64,
@@ -241,13 +276,13 @@ const QUEUE: usize = 1000;
 
 impl UsageWriter {
     /// Starts the writer task.
-    pub fn start(db: SqlitePool) -> Self {
+    pub fn start(db: SqlitePool, prices: PriceCache) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Job>(QUEUE);
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 match job {
                     Job::Rows(rows) => {
-                        if let Err(err) = insert_all(&db, &rows).await {
+                        if let Err(err) = insert_all(&db, &prices, &rows).await {
                             let request = rows.first().map(|row| row.request_id.as_str()).unwrap_or_default();
                             tracing::error!(error = %err, request, "cannot save the usage rows");
                         }
@@ -282,15 +317,44 @@ impl UsageWriter {
     }
 }
 
-async fn insert_all(db: &SqlitePool, rows: &[Row]) -> Result<(), sqlx::Error> {
+async fn insert_all(db: &SqlitePool, prices: &PriceCache, rows: &[Row]) -> Result<(), sqlx::Error> {
+    let book = prices.get();
     let mut tx = db.begin().await?;
     for row in rows {
-        insert(&mut tx, row).await?;
+        let cost = book.cost(&cost_input(row));
+        insert(&mut tx, row, &cost).await?;
     }
     tx.commit().await
 }
 
-async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error> {
+fn cost_input(row: &Row) -> CostInput {
+    let mut input = CostInput {
+        component: row.component.to_owned(),
+        upstream: row.upstream.to_owned(),
+        resolved_model: row.resolved_model.clone(),
+        usage_status: row.usage_status.to_owned(),
+        usage_exact: usage_exact(row),
+        service_tier_reported: row.service_tier_reported.clone(),
+        speed: row.extras.speed.clone(),
+        inference_geo: row.extras.inference_geo.clone(),
+        web_search_calls: row.web_search_calls,
+        web_search_preview_calls: row.web_search_preview_calls,
+        images_generated: row.media.images_generated,
+        image_size: row.media.image_size.clone(),
+        image_quality: row.media.image_quality.clone(),
+        characters: row.media.characters,
+        seconds: row.media.seconds,
+        ..CostInput::default()
+    };
+    input.set_tokens(&row.tokens);
+    input
+}
+
+fn usage_exact(row: &Row) -> bool {
+    row.usage_status == "reported" && !row.tokens.inexact
+}
+
+async fn insert(db: &mut SqliteConnection, row: &Row, cost: &Cost) -> Result<(), sqlx::Error> {
     let t = &row.tokens;
     // Rows of deleted keys, accounts or connections keep NULL, so the insert does not fail on
     // the foreign key.
@@ -302,10 +366,11 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
              cache_write_1h, input_image, input_image_cached, output_text, output_reasoning, output_audio,
              output_image, web_search_calls, failover_attempts, images_generated, image_size, image_quality,
              input_images, characters, seconds, web_search_preview_calls, speed, inference_geo,
-             accepted_prediction_tokens, rejected_prediction_tokens, reported_cost_nano)
+             accepted_prediction_tokens, rejected_prediction_tokens, reported_cost_nano, cost_nano,
+             cost_complete, cost_parts, price_version_id)
          VALUES (?, ?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
              (SELECT id FROM connections WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.request_id)
     .bind(row.component)
@@ -328,7 +393,7 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
     .bind(row.latency_ms)
     .bind(row.first_token_ms)
     .bind(row.usage_status)
-    .bind(row.usage_status == "reported" && !t.inexact)
+    .bind(usage_exact(row))
     .bind(t.input_text)
     .bind(t.input_text_cached)
     .bind(t.input_audio)
@@ -355,6 +420,10 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
     .bind(row.extras.accepted_prediction_tokens)
     .bind(row.extras.rejected_prediction_tokens)
     .bind(row.extras.reported_cost_nano)
+    .bind(cost.nano)
+    .bind(cost.complete)
+    .bind(cost.parts_json())
+    .bind(cost.version)
     .execute(db)
     .await?;
     Ok(())

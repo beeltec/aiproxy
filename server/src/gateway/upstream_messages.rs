@@ -681,7 +681,8 @@ pub struct MessagesDecoder {
     content: Vec<Value>,
     raw: HashMap<i64, Value>,
     usage: Value,
-    total: Tokens,
+    /// The sampling steps of the answers that ended (answers, and iterations in them).
+    steps: Vec<Tokens>,
     /// The facts of the last answer that ended.
     extras: Extras,
     stop_reason: Option<String>,
@@ -710,7 +711,7 @@ impl MessagesDecoder {
             content: Vec::new(),
             raw: HashMap::new(),
             usage: Value::Null,
-            total: Tokens::default(),
+            steps: Vec::new(),
             extras: Extras::default(),
             stop_reason: None,
             output: Vec::new(),
@@ -1049,7 +1050,7 @@ impl MessagesDecoder {
         };
         let mut response = json!({ "id": self.id, "object": "response", "created_at": self.created, "model": self.model,
                                    "status": if incomplete.is_some() { "incomplete" } else { "completed" },
-                                   "output": output, "usage": self.total.to_responses_usage() });
+                                   "output": output, "usage": Tokens::sum(&self.steps).to_responses_usage() });
         if let Some(tier) = &self.service_tier {
             response["service_tier"] = json!(tier);
         }
@@ -1068,8 +1069,8 @@ impl MessagesDecoder {
     fn add_usage(&mut self) {
         self.answers += 1;
         self.answer_chars = 0;
-        let tokens = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
-        add_tokens(&mut self.total, &tokens);
+        self.steps
+            .extend(Tokens::anthropic_steps(&self.usage, self.ttl.as_deref()));
         self.extras = Extras::from_usage(&self.usage);
         self.usage = Value::Null;
     }
@@ -1078,16 +1079,6 @@ impl MessagesDecoder {
     fn paused(&self) -> bool {
         self.stopped && self.stop_reason.as_deref() == Some("pause_turn")
     }
-}
-
-fn add_tokens(total: &mut Tokens, tokens: &Tokens) {
-    total.input_text += tokens.input_text;
-    total.input_text_cached += tokens.input_text_cached;
-    total.cache_write_5m += tokens.cache_write_5m;
-    total.cache_write_1h += tokens.cache_write_1h;
-    total.output_text += tokens.output_text;
-    total.output_reasoning += tokens.output_reasoning;
-    total.inexact |= tokens.inexact;
 }
 
 /// Appends in place: a copy of the whole text per delta would make long streams quadratic.
@@ -1159,22 +1150,26 @@ impl Decoder for MessagesDecoder {
     }
 
     /// Unknown until the first upstream answer ended; then the engine estimates instead.
-    /// A continuation that broke off adds what its usage showed so far; the total is then not
-    /// exact.
     fn tokens(&self) -> Option<Tokens> {
+        (self.answers > 0).then(|| Tokens::sum(&self.steps()))
+    }
+
+    /// A continuation that broke off adds what its usage showed so far, as a step that is not
+    /// exact.
+    fn steps(&self) -> Vec<Tokens> {
         if self.answers == 0 {
-            return None;
+            return Vec::new();
         }
-        let mut total = self.total.clone();
+        let mut steps = self.steps.clone();
         if self.usage.is_object() {
             let mut partial = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
             // The final usage of the broken answer is missing: its streamed text counts at
             // least (about 4 characters per token).
             partial.output_text = partial.output_text.max((self.answer_chars / 4) as i64);
-            add_tokens(&mut total, &partial);
-            total.inexact = true;
+            partial.inexact = true;
+            steps.push(partial);
         }
-        Some(total)
+        steps
     }
 
     fn continuation(&mut self) -> Option<Vec<Value>> {
@@ -1195,7 +1190,7 @@ impl Decoder for MessagesDecoder {
     }
 
     fn output_tokens(&self) -> i64 {
-        self.total.output()
+        Tokens::sum(&self.steps).output()
     }
 
     fn extras(&self) -> Extras {

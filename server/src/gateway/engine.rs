@@ -126,6 +126,9 @@ pub(super) struct Outcome {
     pub tokens: Option<Tokens>,
     /// The usage facts besides the tokens, with `tokens`.
     pub extras: Extras,
+    /// The sampling steps of `tokens` (Anthropic answers and their iterations). Each step
+    /// with its own row, so that the price of long requests applies per step.
+    pub steps: Vec<Tokens>,
     /// The service tier that a native Chat or Messages answer reported.
     pub service_tier: Option<String>,
     pub first_token_ms: Option<i64>,
@@ -619,6 +622,16 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         (None, Some(response)) => Extras::from_usage(&response["usage"]),
         _ => outcome.extras.clone(),
     };
+    // An answer with several sampling steps (Anthropic continuations and iterations) has one
+    // row per step; the first step is on the model row.
+    let mut steps = match &outcome.tokens {
+        Some(_) if outcome.steps.len() > 1 => outcome.steps.clone(),
+        _ => Vec::new(),
+    };
+    if let Some(first) = steps.first_mut() {
+        first.inexact |= outcome.searches_uncounted;
+    }
+    let row_tokens = steps.first().cloned().unwrap_or(tokens);
     // Prices differ per search tool; a request has one of them.
     let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
     let preview_search = tools.iter().any(|tool| tool["type"] == "web_search_preview")
@@ -654,7 +667,7 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         latency_ms: started.elapsed().as_millis() as i64,
         first_token_ms: outcome.first_token_ms,
         usage_status,
-        tokens,
+        tokens: row_tokens,
         web_search_calls: if preview_search { 0 } else { outcome.web_search_calls },
         web_search_preview_calls: if preview_search { outcome.web_search_calls } else { 0 },
         failover_attempts: (outcome.attempts - 1).max(0),
@@ -681,10 +694,27 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         extras: Extras::default(),
         ..row.clone()
     });
-    state
-        .usage
-        .record_all(std::iter::once(row).chain(image_row).collect())
-        .await;
+    let step_rows: Vec<Row> = steps
+        .into_iter()
+        .skip(1)
+        .map(|step| Row {
+            component: "iteration",
+            first_token_ms: None,
+            tokens: step,
+            web_search_calls: 0,
+            web_search_preview_calls: 0,
+            media: Media::default(),
+            extras: Extras {
+                reported_cost_nano: None,
+                ..row.extras.clone()
+            },
+            ..row.clone()
+        })
+        .collect();
+    let mut rows = vec![row];
+    rows.extend(step_rows);
+    rows.extend(image_row);
+    state.usage.record_all(rows).await;
 }
 
 /// Images in the request input (content parts and tool outputs).

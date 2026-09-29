@@ -13,9 +13,19 @@ pub struct Settings {
     pub time_zone: String,
     pub refresh: RefreshSchedule,
     pub failover: Failover,
+    /// The price sync from the public price lists.
+    #[serde(default = "default_price_sync")]
+    pub price_sync: RefreshSchedule,
 }
 
-/// Scheduled token refresh of the ChatGPT accounts.
+fn default_price_sync() -> RefreshSchedule {
+    RefreshSchedule {
+        enabled: true,
+        cron: "0 4 * * *".into(),
+    }
+}
+
+/// A scheduled job (token refresh, price sync).
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RefreshSchedule {
     pub enabled: bool,
@@ -42,6 +52,7 @@ impl Default for Settings {
                 enabled: false,
                 threshold_percent: 95,
             },
+            price_sync: default_price_sync(),
         }
     }
 }
@@ -74,6 +85,7 @@ impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         time_zone(&self.time_zone)?;
         parse_cron(&self.refresh.cron)?;
+        parse_cron(&self.price_sync.cron)?;
         if !(1..=100).contains(&self.failover.threshold_percent) {
             return Err("The failover threshold must be 1 to 100 percent.".into());
         }

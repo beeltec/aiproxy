@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod gateway;
 mod outbound;
+mod prices;
 mod rate_limit;
 mod settings;
 mod state;
@@ -76,6 +77,8 @@ async fn serve() -> anyhow::Result<()> {
     let rejected_db = state.db.clone();
     tokio::spawn(async move { rejected.run(rejected_db).await });
     tokio::spawn(chatgpt::scheduler::run(state.clone()));
+    state.prices.reload(&state.db).await?;
+    tokio::spawn(prices::sync::run(state.clone()));
     let app = router(state.clone(), WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await
