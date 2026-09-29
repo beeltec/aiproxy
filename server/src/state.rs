@@ -16,7 +16,7 @@ use crate::client_ip::TrustedProxies;
 use crate::config::Config;
 use crate::connections::catalog::CatalogCache;
 use crate::crypto::{PasswordHasher, SecretBox};
-use crate::gateway::{KeyLimits, RejectedCounter, ThinkingCache};
+use crate::gateway::{ItemCache, KeyLimits, RejectedCounter, ThinkingCache};
 use crate::prices::PriceCache;
 use crate::prices::recompute::Recompute;
 use crate::rate_limit::SlidingWindow;
@@ -40,6 +40,7 @@ pub struct AppState {
     pub upstream_http: reqwest::Client,
     pub catalog: Arc<CatalogCache>,
     pub thinking_cache: Arc<ThinkingCache>,
+    pub item_cache: Arc<ItemCache>,
     pub refresher: Arc<Refresher>,
     pub link_flows: Arc<LinkFlows>,
     /// Wakes the refresh scheduler after changes to the plans.
@@ -83,6 +84,7 @@ impl AppState {
             upstream_http: crate::outbound::client(config.allow_private_upstreams)?,
             catalog: Arc::default(),
             thinking_cache: Arc::default(),
+            item_cache: Arc::default(),
             refresher: Arc::default(),
             link_flows: Arc::default(),
             schedule_changed: Arc::default(),

@@ -5,6 +5,7 @@ mod chat_api;
 mod codex;
 mod engine;
 mod error;
+mod item_cache;
 mod media;
 mod messages_api;
 mod provider;
@@ -27,6 +28,7 @@ use serde_json::{Value, json};
 use auth::ApiKey;
 
 pub use auth::KeyLimits;
+pub use item_cache::ItemCache;
 pub use rejected::RejectedCounter;
 pub use thinking_cache::ThinkingCache;
 

@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::codex::error_text;
 use super::engine::{
-    Event, Failure, IDLE_TIMEOUT, Job, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, Outcome, TOTAL_TIMEOUT, limited_events,
-    too_large,
+    Event, Failure, IDLE_TIMEOUT, Job, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, Outcome, TOTAL_TIMEOUT, keep_output,
+    limited_events, too_large,
 };
 use super::{sse, upstream_chat, upstream_messages};
 use crate::connections::{Connection, Kind};
@@ -199,13 +199,14 @@ pub(super) async fn attempt(
     if native && !stream {
         let answer = read_json(response, MAX_OUTPUT_BYTES).await?;
         record_native(wire, &answer, ttl.as_deref(), outcome);
+        keep_output(state, job, outcome);
         let _ = tx.send(Msg::Native(answer)).await;
         return Ok(());
     }
     if native {
         // From now on the client has native frames; a late error must use the native format.
         outcome.native_wire = Some(wire);
-        return native_stream(response, wire, job, ttl.as_deref(), tx, outcome, started).await;
+        return native_stream(state, response, wire, job, ttl.as_deref(), tx, outcome, started).await;
     }
 
     let mut decoder: Box<dyn Decoder> = match wire {
@@ -326,6 +327,7 @@ pub(super) async fn attempt(
                 if job.client_format == "chat" {
                     state.thinking_cache.store(job.key.id, decoder.assistant_content());
                 }
+                keep_output(state, job, outcome);
             }
             if tx.send(Msg::Event(event)).await.is_err() {
                 return Err(super::engine::client_closed());
@@ -468,7 +470,9 @@ pub(super) fn native_error(wire: Wire, failure: &Failure) -> Vec<bytes::Bytes> {
 }
 
 /// Forwards a native stream and reads its usage.
+#[allow(clippy::too_many_arguments)]
 async fn native_stream(
+    state: &AppState,
     response: reqwest::Response,
     wire: Wire,
     job: &Job,
@@ -498,6 +502,9 @@ async fn native_stream(
             return Err(too_large("The upstream sent an event larger than 16 MB."));
         }
         let forward = tap.push(wire, &next.event, &next.data, client_wants_usage, ttl, outcome, started);
+        if tap.done {
+            keep_output(state, job, outcome);
+        }
         if forward {
             let name = (next.event != "message").then_some(next.event.as_str());
             if tx.send(Msg::Raw(sse::frame(name, &next.data))).await.is_err() {

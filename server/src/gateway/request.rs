@@ -13,6 +13,8 @@ use crate::state::AppState;
 pub(super) const DEFAULT_OUTPUT_RESERVE: i64 = 4_000;
 const MAX_OUTPUT_RESERVE: i64 = 8_000;
 const MAX_MODEL_NAME: usize = 200;
+/// Upper bound for the output items that references put back into one request.
+const MAX_RESOLVED_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct Prepared {
     pub job: Job,
@@ -29,7 +31,7 @@ pub struct Incoming<'a> {
     pub anthropic_version: Option<&'a str>,
 }
 
-/// Validates a Responses request body and builds the job.
+/// Validates a Responses request body, puts back the referenced output items and builds the job.
 pub async fn prepare(
     state: &AppState,
     key: &ApiKey,
@@ -39,7 +41,7 @@ pub async fn prepare(
     let Incoming {
         format,
         mut body,
-        native,
+        mut native,
         cache_hint,
         anthropic_beta,
         anthropic_version,
@@ -47,11 +49,14 @@ pub async fn prepare(
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
         .as_str()
+        .map(str::to_owned)
         .ok_or_else(|| bad("The field `model` is missing."))?;
     reject_stored_state(&body)?;
+    resolve_references(state, key, &mut body)?;
+    resolve_references(state, key, &mut native)?;
     reject_hosted_tools(&body)?;
     check_options(&body)?;
-    let route = route(state, key, requested).await?;
+    let route = route(state, key, &requested).await?;
     let anthropic = matches!(
         route.upstream,
         Upstream::Connection {
@@ -333,7 +338,8 @@ fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
 }
 
 /// Server-side state (stored responses, conversations, provider files, background runs) would
-/// be shared by all gateway keys through one account, so it is not supported.
+/// be shared by all gateway keys through one account, so it is not supported. Top-level
+/// references to earlier output items are resolved from memory (see `resolve_references`).
 fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "unsupported_parameter", message);
     if !body["previous_response_id"].is_null() || !body["conversation"].is_null() {
@@ -347,14 +353,17 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     if body["prompt"]["id"].is_string() {
         return Err(bad("Stored prompts (`prompt.id`) are not supported."));
     }
-    let mut stored_reference = false;
+    let mut stored_reference = body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| [&item["content"], &item["output"]])
+        .filter_map(Value::as_array)
+        .flatten()
+        .any(is_reference);
     visit_parts(&body["input"], &mut |part| {
         let kind = part["type"].as_str().unwrap_or_default();
-        // An item with only an `id` is a reference too (its `type` is optional).
-        let id_only = part["type"].is_null() && part["role"].is_null() && !part["id"].is_null();
-        let provider_object = id_only
-            || kind == "item_reference"
-            || (!part["file_id"].is_null() && kind.starts_with("input_"))
+        let provider_object = (!part["file_id"].is_null() && kind.starts_with("input_"))
             || !part["container_id"].is_null()
             || kind.starts_with("code_interpreter")
             || kind.starts_with("file_search")
@@ -373,6 +382,41 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
         return Err(bad(
             "References to stored items or files are not supported. Send the content inline.",
         ));
+    }
+    Ok(())
+}
+
+/// An `item_reference`, or an item with only an `id` (its `type` is optional).
+fn is_reference(item: &Value) -> bool {
+    item["type"] == "item_reference" || (item["type"].is_null() && item["role"].is_null() && !item["id"].is_null())
+}
+
+/// Replaces each top-level reference in `input` with the output item that it refers to. Only
+/// items from earlier answers to the same API key are known (see `item_cache`).
+fn resolve_references(state: &AppState, key: &ApiKey, body: &mut Value) -> Result<(), Failure> {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut resolved_bytes = 0usize;
+    for item in items.iter_mut().filter(|item| is_reference(item)) {
+        let id = item["id"].as_str().unwrap_or_default().to_owned();
+        let Some((cached, size)) = state.item_cache.get(key.id, &id) else {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("The item `{id}` is unknown or has expired. Send the item content inline."),
+            ));
+        };
+        // A client can repeat one reference many times, so the total is bounded.
+        resolved_bytes += size;
+        if resolved_bytes > MAX_RESOLVED_BYTES {
+            return Err(Failure::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "The referenced items are larger than 16 MB. Send fewer references or the content inline.",
+            ));
+        }
+        *item = cached.as_ref().clone();
     }
     Ok(())
 }
