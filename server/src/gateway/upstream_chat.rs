@@ -106,13 +106,17 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                         // Items of one assistant turn (for example a tool call, then text) must
                         // be one Chat message before the tool results.
                         if let Some(last) = messages.last_mut().filter(|m| m["role"] == "assistant") {
+                            // Appended in place: copying the whole text per item would be slow.
                             let text = text_of(&item["content"]);
-                            let joined = match last["content"].as_str().filter(|t| !t.is_empty()) {
-                                Some(old) if !text.is_empty() => format!("{old}\n{text}"),
-                                Some(old) => old.to_owned(),
-                                None => text,
-                            };
-                            last["content"] = json!(joined);
+                            if !text.is_empty() {
+                                match &mut last["content"] {
+                                    Value::String(old) if !old.is_empty() => {
+                                        old.push('\n');
+                                        old.push_str(&text);
+                                    }
+                                    slot => *slot = json!(text),
+                                }
+                            }
                             continue;
                         }
                         let mut message = json!({ "role": "assistant", "content": text_of(&item["content"]) });

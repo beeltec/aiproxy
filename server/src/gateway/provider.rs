@@ -663,7 +663,11 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
                 body["stream_options"]["include_usage"] = json!(true);
             }
             // OpenRouter searches only with its `web` plugin (or a model's own search).
-            if kind == Kind::OpenRouter && body["web_search_options"].is_object() && body["plugins"].is_null() {
+            if kind == Kind::OpenRouter
+                && body["web_search_options"].is_object()
+                && body["plugins"].is_null()
+                && body["tool_choice"] != "none"
+            {
                 body["plugins"] = json!([{ "id": "web" }]);
             }
         }
@@ -749,8 +753,46 @@ fn cache_ttl(body: &Value) -> Option<String> {
     }
 }
 
-/// Usage of a native answer without streaming.
+/// Usage of a native answer without streaming. The output length is kept for the estimate
+/// when the upstream reports no usage.
 fn record_native(wire: Wire, answer: &Value, ttl: Option<&str>, outcome: &mut Outcome) {
+    outcome.streamed_chars = match wire {
+        Wire::Responses => answer["output"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter_map(|part| part["text"].as_str())
+            .map(str::len)
+            .sum(),
+        Wire::Chat => answer["choices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|choice| {
+                let message = &choice["message"];
+                let calls: usize = message["tool_calls"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call| call["function"]["arguments"].as_str())
+                    .map(str::len)
+                    .sum();
+                message["content"].as_str().map_or(0, str::len) + calls
+            })
+            .sum(),
+        Wire::Messages => answer["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|block| {
+                block["text"]
+                    .as_str()
+                    .or_else(|| block["thinking"].as_str())
+                    .map_or(0, str::len)
+            })
+            .sum(),
+    };
     match wire {
         Wire::Responses => {
             outcome.web_search_calls = answer["output"]
