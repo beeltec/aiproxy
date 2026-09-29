@@ -49,3 +49,31 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo build --locked
+
+  # The TypeScript types of the admin API must match the server.
+  api-types:
+    runs-on: ubuntu-latest
+    needs: server
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: web/dist/client
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm gen:api && pnpm biome format --write src/lib/api/schema.d.ts
+        working-directory: web
+      - run: git diff --exit-code web/src/lib/api/schema.d.ts

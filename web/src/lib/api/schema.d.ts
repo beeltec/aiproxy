@@ -1495,7 +1495,10 @@ export interface components {
 			};
 			totals: components["schemas"]["StatsTotals"];
 		};
-		/** @description Sums of usage rows. Requests count distinct request ids. */
+		/**
+		 * @description Sums of usage rows. A request counts once, on its model row, so the groups add up to the
+		 *     total.
+		 */
 		StatsTotals: {
 			/** @description Per category (the usage column names): tokens, calls, images, characters, seconds. */
 			amounts: {
