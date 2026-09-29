@@ -404,6 +404,7 @@ fn forward(
         // A keep-alive comment may only go between two events.
         let mut between_events = true;
         let mut idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
+        let mut end_by = None;
         let failure = loop {
             let next = tokio::select! {
                 next = chunks.next() => next,
@@ -478,7 +479,12 @@ fn forward(
                     break Some(engine::too_large("An event of the answer is larger than 16 MB."));
                 }
             }
-            idle_until = tokio::time::Instant::now() + if ended { END_WAIT } else { IDLE_TIMEOUT };
+            // The end wait starts once, at the last event.
+            if ended {
+                idle_until = *end_by.get_or_insert_with(|| tokio::time::Instant::now() + END_WAIT);
+            } else {
+                idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
+            }
             tokio::select! {
                 sent = tx.send(Ok(chunk)) => if sent.is_err() {
                     break Some(engine::client_closed());
@@ -643,7 +649,8 @@ pub async fn speech(
             ));
         }
         let characters = input.chars().count() as i64;
-        let estimate = crate::tokens::estimate(&json!(input)).await as i64;
+        // The instructions are text input too; only the input is spoken.
+        let estimate = crate::tokens::estimate(&json!([input, body["instructions"]])).await as i64;
         let audio = characters * SPEECH_TOKENS_PER_CHARACTER;
         let reserved = reserve(&state, &key, estimate + audio)?;
         body["model"] = json!(route.upstream_model);
@@ -849,7 +856,17 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
     let track = reader.default_track(TrackType::Audio)?;
     let (id, time_base) = (track.id, track.time_base?);
     let (mut total, mut first, mut end) = (0_u64, i64::MAX, i64::MIN);
-    while let Ok(Some(packet)) = reader.next_packet() {
+    loop {
+        let packet = match reader.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            // A file without a length in its header (streamed WAV) ends like this.
+            Err(symphonia::core::errors::Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break;
+            }
+            // A part of the length is worse than none: the file size then gives the estimate.
+            Err(_) => return None,
+        };
         if Instant::now() > until {
             return None;
         }
@@ -1104,13 +1121,14 @@ enum ImageBody {
 }
 
 /// Image settings that the Responses image-generation tool takes from an Images API request.
-const TOOL_FIELDS: [&str; 6] = [
+const TOOL_FIELDS: [&str; 7] = [
     "size",
     "quality",
     "background",
     "output_format",
     "output_compression",
     "moderation",
+    "input_fidelity",
 ];
 
 /// Makes the image on ChatGPT: a Responses request with the image-generation tool, answered in
