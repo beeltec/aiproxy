@@ -102,10 +102,14 @@ export function rangeBounds(
 	now = new Date(),
 ): [number, number] {
 	if (range === "custom" && from && until) {
-		const start = new Date(`${from}T00:00`);
-		// The day after the last date, also on a day with a clock change.
-		const end = new Date(`${until}T00:00`);
-		end.setDate(end.getDate() + 1);
+		// Local midnights from the calendar dates; a midnight in a clock change gap becomes
+		// the moment of the change.
+		const midnight = (date: string, days = 0) => {
+			const [year, month, day] = date.split("-").map(Number);
+			return new Date(year ?? 1970, (month ?? 1) - 1, (day ?? 1) + days);
+		};
+		const start = midnight(from);
+		const end = midnight(until, 1);
 		return [
 			Math.floor(start.getTime() / 1000),
 			Math.floor(end.getTime() / 1000),

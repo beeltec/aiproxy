@@ -32,6 +32,7 @@ import {
 	DropdownMenuCheckboxItem,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "#/components/ui/dropdown-menu";
 import {
@@ -713,6 +714,13 @@ function Recompute() {
 		useQuery(
 			statsQuery({ range: { range: "custom", from, to }, group: "model" }),
 		).data?.groups ?? [];
+	// Chosen models stay in the list, so they can be removed after the dates change.
+	const choices = [
+		...used.map((m) => ({ key: m.key, label: m.label })),
+		...models
+			.filter((name) => !used.some((m) => m.key === name))
+			.map((name) => ({ key: name, label: name })),
+	];
 	const start = useMutation({
 		mutationFn: () => {
 			// From the first local midnight to the one after the last day.
@@ -785,12 +793,16 @@ function Recompute() {
 							align="start"
 							className="max-h-80 w-80 overflow-y-auto"
 						>
-							{used.length === 0 && (
+							<DropdownMenuItem onClick={() => setModels([])}>
+								All models
+							</DropdownMenuItem>
+							<DropdownMenuSeparator />
+							{choices.length === 0 && (
 								<p className="px-2 py-1.5 text-xs text-muted-foreground">
 									No requests in these dates.
 								</p>
 							)}
-							{used.map((m) => (
+							{choices.map((m) => (
 								<DropdownMenuCheckboxItem
 									key={m.key}
 									checked={models.includes(m.key)}
