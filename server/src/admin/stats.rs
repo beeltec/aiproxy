@@ -52,7 +52,8 @@ pub struct StatsRequest {
     upstreams: Vec<String>,
 }
 
-/// Sums of usage rows. Requests count distinct request ids.
+/// Sums of usage rows. A request counts once, on its model row, so the groups add up to the
+/// total.
 #[derive(Serialize, ToSchema, Default)]
 pub struct StatsTotals {
     requests: i64,
@@ -131,21 +132,24 @@ fn buckets(from: i64, to: i64, tz: Tz, size: &str) -> Vec<i64> {
     // An hour bucket starts at each local full hour. The candidates step a quarter hour in
     // real time, so a repeated hour at a clock change is its own bucket, and a clock change of
     // 30 minutes keeps the local borders.
+    // The first candidate can already be a later full hour (after a clock change gap). Some
+    // historic offsets have no full hours in UTC steps; the candidates have a limit.
     if size == "hour" {
         let mut at = local(tz, date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start));
-        loop {
-            at += 900;
+        for _ in 0..MAX_BUCKETS * 8 {
             let full_hour = tz
                 .timestamp_opt(at, 0)
                 .single()
                 .is_some_and(|t| t.minute() == 0 && t.second() == 0);
-            if full_hour && !push(at) {
-                return out;
+            if at > from && full_hour && !push(at) {
+                break;
             }
             if at >= to {
-                return out;
+                break;
             }
+            at += 900;
         }
+        return out;
     }
     let mut current = match size {
         "day" => midnight(date),
@@ -183,7 +187,8 @@ fn auto_bucket(from: i64, to: i64) -> &'static str {
 /// The SQL sums; `aggregate` reads them in the same order.
 fn push_sums(query: &mut QueryBuilder<Sqlite>) {
     query.push(
-        "COUNT(DISTINCT u.request_id), COUNT(DISTINCT CASE WHEN u.status_code >= 400 THEN u.request_id END), \
+        "COUNT(DISTINCT CASE WHEN u.component = 'model' THEN u.request_id END), \
+         COUNT(DISTINCT CASE WHEN u.component = 'model' AND u.status_code >= 400 THEN u.request_id END), \
          COALESCE(SUM(u.cost_nano), 0), COALESCE(SUM(u.reported_cost_nano), 0), \
          SUM(CASE WHEN u.cost_nano IS NULL AND u.usage_status <> 'none' THEN 1 ELSE 0 END), \
          SUM(CASE WHEN u.cost_nano IS NOT NULL AND u.cost_complete = 0 AND u.usage_status <> 'none' THEN 1 ELSE 0 END)",
@@ -308,6 +313,10 @@ fn validate(req: &StatsRequest) -> ApiResult<(Tz, &'static str)> {
     if req.from >= req.to {
         return Err(ApiError::bad_request("The start must be before the end."));
     }
+    // Unix seconds of the year 3000.
+    if req.from < 0 || req.to > 32_503_680_000 {
+        return Err(ApiError::bad_request("The range must be between 1970 and 3000."));
+    }
     let tz = settings::time_zone(&req.time_zone).map_err(ApiError::bad_request)?;
     if !["key", "model", "upstream", "none"].contains(&req.group.as_str()) {
         return Err(ApiError::bad_request("StatsGroup by key, model, upstream or none."));
@@ -351,7 +360,9 @@ async fn stats(
     push_sums(&mut query);
     query.push(" FROM usage u");
     push_filters(&mut query, &req);
-    let row = query.build().fetch_one(&state.db).await?;
+    // All reads use one snapshot, so the totals, the groups and the series agree.
+    let mut tx = state.db.begin().await?;
+    let row = query.build().fetch_one(&mut *tx).await?;
     let totals = aggregate(&row, 0)?;
 
     // StatsTotals per group.
@@ -360,7 +371,7 @@ async fn stats(
     query.push(" FROM usage u");
     push_filters(&mut query, &req);
     query.push(" GROUP BY 1");
-    let rows = query.build().fetch_all(&state.db).await?;
+    let rows = query.build().fetch_all(&mut *tx).await?;
     let mut groups: Vec<(String, StatsTotals)> = Vec::with_capacity(rows.len());
     for row in &rows {
         groups.push((row.try_get(0)?, aggregate(row, 1)?));
@@ -382,14 +393,15 @@ async fn stats(
     let inputs: Vec<String> = CATEGORIES[..INPUTS].iter().map(|c| format!("u.{c}")).collect();
     let outputs: Vec<String> = CATEGORIES[INPUTS..TOKENS].iter().map(|c| format!("u.{c}")).collect();
     query.push(format!(
-        ") SELECT b.i, {group}, COUNT(DISTINCT u.request_id), COALESCE(SUM({}), 0), COALESCE(SUM({}), 0), \
+        ") SELECT b.i, {group}, COUNT(DISTINCT CASE WHEN u.component = 'model' THEN u.request_id END), \
+         COALESCE(SUM({}), 0), COALESCE(SUM({}), 0), \
          COALESCE(SUM(u.cost_nano), 0) FROM b JOIN usage u ON u.time >= b.s AND u.time < b.e",
         inputs.join(" + "),
         outputs.join(" + "),
     ));
     push_filters(&mut query, &req);
     query.push(" GROUP BY 1, 2");
-    let rows = query.build().fetch_all(&state.db).await?;
+    let rows = query.build().fetch_all(&mut *tx).await?;
     let mut series: HashMap<String, Vec<StatsPoint>> = HashMap::new();
     for row in &rows {
         let index: i64 = row.try_get(0)?;
@@ -432,8 +444,9 @@ async fn stats(
         sqlx::query_as("SELECT reason, SUM(count) FROM rejected_requests WHERE hour >= ? AND hour < ? GROUP BY reason")
             .bind(first_hour)
             .bind(req.to)
-            .fetch_all(&state.db)
+            .fetch_all(&mut *tx)
             .await?;
+    tx.commit().await?;
 
     Ok(Json(StatsResponse {
         bucket: bucket.to_owned(),
