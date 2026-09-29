@@ -151,6 +151,34 @@ impl Tokens {
     }
 }
 
+/// Usage facts besides the token categories.
+#[derive(Clone, Debug, Default)]
+pub struct Extras {
+    /// Anthropic `speed` (`fast` or `standard`).
+    pub speed: Option<String>,
+    /// Anthropic `inference_geo`.
+    pub inference_geo: Option<String>,
+    /// The cost that the provider reported (OpenRouter `cost`, in USD), in nano-USD.
+    pub reported_cost_nano: Option<i64>,
+    pub accepted_prediction_tokens: i64,
+    pub rejected_prediction_tokens: i64,
+}
+
+impl Extras {
+    /// Reads the facts of an OpenAI, OpenRouter or Anthropic usage object.
+    pub fn from_usage(usage: &Value) -> Self {
+        let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        let details = &usage["completion_tokens_details"];
+        Self {
+            speed: text(&usage["speed"]),
+            inference_geo: text(&usage["inference_geo"]),
+            reported_cost_nano: usage["cost"].as_f64().map(|usd| (usd * 1e9).round() as i64),
+            accepted_prediction_tokens: details["accepted_prediction_tokens"].as_i64().unwrap_or(0).max(0),
+            rejected_prediction_tokens: details["rejected_prediction_tokens"].as_i64().unwrap_or(0).max(0),
+        }
+    }
+}
+
 /// Quantities of media requests and of the image-generation tool.
 #[derive(Clone, Debug, Default)]
 pub struct Media {
@@ -189,9 +217,12 @@ pub struct Row {
     /// `reported`, `estimated` or `none`.
     pub usage_status: &'static str,
     pub tokens: Tokens,
+    /// Calls of the `web_search` tool (also Anthropic web search).
     pub web_search_calls: i64,
+    pub web_search_preview_calls: i64,
     pub failover_attempts: i64,
     pub media: Media,
+    pub extras: Extras,
 }
 
 enum Job {
@@ -270,10 +301,11 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
              usage_exact, input_text, input_text_cached, input_audio, input_audio_cached, cache_write_5m,
              cache_write_1h, input_image, input_image_cached, output_text, output_reasoning, output_audio,
              output_image, web_search_calls, failover_attempts, images_generated, image_size, image_quality,
-             input_images, characters, seconds)
+             input_images, characters, seconds, web_search_preview_calls, speed, inference_geo,
+             accepted_prediction_tokens, rejected_prediction_tokens, reported_cost_nano)
          VALUES (?, ?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
              (SELECT id FROM connections WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.request_id)
     .bind(row.component)
@@ -317,6 +349,12 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
     .bind(row.media.input_images)
     .bind(row.media.characters)
     .bind(row.media.seconds)
+    .bind(row.web_search_preview_calls)
+    .bind(&row.extras.speed)
+    .bind(&row.extras.inference_geo)
+    .bind(row.extras.accepted_prediction_tokens)
+    .bind(row.extras.rejected_prediction_tokens)
+    .bind(row.extras.reported_cost_nano)
     .execute(db)
     .await?;
     Ok(())

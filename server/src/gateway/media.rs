@@ -25,7 +25,7 @@ use crate::connections::{Connection, Kind};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Media, Row, Tokens};
+use crate::usage::{Extras, Media, Row, Tokens};
 
 /// A request that the gateway accepted, with what the usage row needs.
 #[derive(Clone)]
@@ -180,8 +180,10 @@ async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
         usage_status: recorded.usage_status,
         tokens: recorded.tokens,
         web_search_calls: 0,
+        web_search_preview_calls: 0,
         failover_attempts: 0,
         media: recorded.media,
+        extras: Extras::default(),
     };
     state.usage.record(row).await;
 }

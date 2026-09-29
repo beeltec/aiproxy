@@ -17,7 +17,7 @@ use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Media, Row, Tokens};
+use crate::usage::{Extras, Media, Row, Tokens};
 
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -124,6 +124,8 @@ pub(super) struct Outcome {
     pub final_response: Option<Value>,
     /// Usage in billing categories, when the upstream format is not OpenAI's.
     pub tokens: Option<Tokens>,
+    /// The usage facts besides the tokens, with `tokens`.
+    pub extras: Extras,
     /// The service tier that a native Chat or Messages answer reported.
     pub service_tier: Option<String>,
     pub first_token_ms: Option<i64>,
@@ -612,6 +614,15 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
+    // A Responses final answer has the facts in its usage.
+    let extras = match (&outcome.tokens, response) {
+        (None, Some(response)) => Extras::from_usage(&response["usage"]),
+        _ => outcome.extras.clone(),
+    };
+    // Prices differ per search tool; a request has one of them.
+    let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let preview_search = tools.iter().any(|tool| tool["type"] == "web_search_preview")
+        && !tools.iter().any(|tool| tool["type"] == "web_search");
     let row = Row {
         request_id: random_token(12),
         component: "model",
@@ -644,8 +655,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         first_token_ms: outcome.first_token_ms,
         usage_status,
         tokens,
-        web_search_calls: outcome.web_search_calls,
+        web_search_calls: if preview_search { 0 } else { outcome.web_search_calls },
+        web_search_preview_calls: if preview_search { outcome.web_search_calls } else { 0 },
         failover_attempts: (outcome.attempts - 1).max(0),
+        extras,
         media: Media {
             input_images: input_images(&job.body["input"]),
             ..Media::default()
@@ -662,8 +675,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         usage_status,
         tokens,
         web_search_calls: 0,
+        web_search_preview_calls: 0,
         failover_attempts: 0,
         media,
+        extras: Extras::default(),
         ..row.clone()
     });
     state

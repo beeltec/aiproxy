@@ -13,7 +13,7 @@ use super::provider::Decoder;
 use super::routing::{Alias, Route};
 use crate::crypto::random_token;
 use crate::db::now;
-use crate::usage::Tokens;
+use crate::usage::{Extras, Tokens};
 
 /// Anthropic thinking blocks go to Responses clients inside encrypted reasoning with this prefix.
 const THINKING_PREFIX: &str = "aipa1:";
@@ -682,6 +682,8 @@ pub struct MessagesDecoder {
     raw: HashMap<i64, Value>,
     usage: Value,
     total: Tokens,
+    /// The facts of the last answer that ended.
+    extras: Extras,
     stop_reason: Option<String>,
     output: Vec<(usize, Value)>,
     service_tier: Option<String>,
@@ -709,6 +711,7 @@ impl MessagesDecoder {
             raw: HashMap::new(),
             usage: Value::Null,
             total: Tokens::default(),
+            extras: Extras::default(),
             stop_reason: None,
             output: Vec::new(),
             service_tier: None,
@@ -1067,6 +1070,7 @@ impl MessagesDecoder {
         self.answer_chars = 0;
         let tokens = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
         add_tokens(&mut self.total, &tokens);
+        self.extras = Extras::from_usage(&self.usage);
         self.usage = Value::Null;
     }
 
@@ -1192,6 +1196,10 @@ impl Decoder for MessagesDecoder {
 
     fn output_tokens(&self) -> i64 {
         self.total.output()
+    }
+
+    fn extras(&self) -> Extras {
+        self.extras.clone()
     }
 
     fn assistant_content(&self) -> &[Value] {
