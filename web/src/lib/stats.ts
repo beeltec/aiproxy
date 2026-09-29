@@ -101,27 +101,30 @@ export function rangeBounds(
 	{ range, from, to: until }: Range,
 	now = new Date(),
 ): [number, number] {
+	const seconds = (date: Date) => Math.floor(date.getTime() / 1000);
 	if (range === "custom" && from && until) {
-		// Local midnights from the calendar dates; a midnight in a clock change gap becomes
-		// the moment of the change.
-		const midnight = (date: string, days = 0) => {
-			const [year, month, day] = date.split("-").map(Number);
-			return new Date(year ?? 1970, (month ?? 1) - 1, (day ?? 1) + days);
-		};
-		const start = midnight(from);
-		const end = midnight(until, 1);
+		const [year, month, day] = from.split("-").map(Number);
+		const [endYear, endMonth, endDay] = until.split("-").map(Number);
 		return [
-			Math.floor(start.getTime() / 1000),
-			Math.floor(end.getTime() / 1000),
+			seconds(midnight(year ?? 1970, (month ?? 1) - 1, day ?? 1)),
+			seconds(
+				midnight(endYear ?? 1970, (endMonth ?? 1) - 1, (endDay ?? 1) + 1),
+			),
 		];
 	}
 	const to = Math.ceil(now.getTime() / 1000);
 	if (range === "24h") return [to - 86_400, to];
-	const start = new Date(now);
-	start.setHours(0, 0, 0, 0);
-	if (range === "month") start.setDate(1);
-	else start.setDate(start.getDate() - (Number.parseInt(range, 10) || 7) + 1);
-	return [Math.floor(start.getTime() / 1000), to];
+	const days = range === "month" ? 0 : (Number.parseInt(range, 10) || 7) - 1;
+	const day = range === "month" ? 1 : now.getDate() - days;
+	return [seconds(midnight(now.getFullYear(), now.getMonth(), day)), to];
+}
+
+/**
+ * The local midnight of a calendar date (the day may be out of the month's range). A
+ * midnight in a clock change gap becomes the moment of the change.
+ */
+function midnight(year: number, month: number, day: number): Date {
+	return new Date(year, month, day);
 }
 
 /** The usage categories in the order of the price lists, with their names in the UI. */
