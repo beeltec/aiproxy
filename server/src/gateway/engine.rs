@@ -288,7 +288,7 @@ async fn attempts(
             if let Some(opened) = opened.take() {
                 let _ = opened.send(Ok(()));
             }
-            match stream_events(state, account, response, tx, outcome, started).await {
+            match stream_events(state, job, account, response, tx, outcome, started).await {
                 StreamEnd::Done => return Ok(()),
                 StreamEnd::ClientGone => return Err(client_closed()),
                 StreamEnd::Unauthorized if !renewed => {
@@ -402,6 +402,7 @@ fn is_terminal(kind: &str) -> bool {
 
 async fn stream_events(
     state: &AppState,
+    job: &Job,
     account: i64,
     response: reqwest::Response,
     tx: &mpsc::Sender<Msg>,
@@ -498,6 +499,7 @@ async fn stream_events(
                 data["response"]["output"] = Value::Array(std::mem::take(&mut output_items));
             }
             outcome.final_response = Some(data["response"].clone());
+            keep_output(state, job, outcome);
         }
 
         let event = Event { kind, data };
@@ -526,6 +528,17 @@ async fn stream_events(
             }
             return StreamEnd::Done;
         }
+    }
+}
+
+/// Keeps the output items of a Responses answer for references in later requests. Call it
+/// before the client gets the end of the answer, so that an immediate next request finds them.
+pub(super) fn keep_output(state: &AppState, job: &Job, outcome: &Outcome) {
+    if job.client_format != "responses" {
+        return;
+    }
+    if let Some(output) = outcome.final_response.as_ref().and_then(|r| r["output"].as_array()) {
+        state.item_cache.store(job.key.id, output);
     }
 }
 

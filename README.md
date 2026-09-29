@@ -133,7 +133,7 @@ curl https://ai.example.com/v1/responses \
 
 Reasoning effort (`reasoning.effort`, `reasoning_effort`, `output_config.effort` or the Anthropic thinking budget) and fast mode (`service_tier: "fast"` or `"priority"`, Anthropic `speed: "fast"`) are mapped between the formats.
 
-Stored server state (`previous_response_id`, conversations, file ids) is not supported: send the full conversation and the content inline. Hosted tools other than web search and image generation are refused.
+Stored server state (`previous_response_id`, conversations, file ids) is not supported: send the full conversation and the content inline. On `/v1/responses`, references to output items (`item_reference`) that aiproxy returned in the last 24 hours to the same API key are put back from memory. Hosted tools other than web search and image generation are refused.
 
 ### Usage and prices
 
