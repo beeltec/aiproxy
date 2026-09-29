@@ -150,15 +150,12 @@ pub struct Prices {
 
 impl Prices {
     /// A context tier that raises the output price and does not list reasoning raises the
-    /// reasoning price too, when the base prices reasoning like output (OpenRouter and LiteLLM
-    /// list reasoning only in the base prices).
+    /// reasoning price too, when the base prices reasoning like output: with no reasoning price
+    /// or the same one (OpenRouter and LiteLLM list reasoning only in the base prices).
     fn tie_reasoning(&mut self) {
         let tied = |base: &TokenPrices, tier: &mut TokenPrices| {
-            if base.output_reasoning.is_some()
-                && base.output_reasoning == base.output_text
-                && tier.output_reasoning.is_none()
-                && tier.output_text.is_some()
-            {
+            let like_output = base.output_reasoning.is_none() || base.output_reasoning == base.output_text;
+            if like_output && tier.output_reasoning.is_none() && tier.output_text.is_some() {
                 tier.output_reasoning = tier.output_text;
             }
         };
