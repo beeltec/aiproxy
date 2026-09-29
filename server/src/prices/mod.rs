@@ -514,9 +514,11 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
             "standard"
         }
     };
-    let tiered = |priority: &Option<TokenPrices>, flex: &Option<TokenPrices>| match tier {
-        "priority" => priority.as_ref().map(TokenPrices::values),
-        "flex" => flex.as_ref().map(TokenPrices::values),
+    let tiered = |priority: &Option<TokenPrices>,
+                  flex: &Option<TokenPrices>,
+                  get: fn(&TokenPrices) -> [Option<f64>; 12]| match tier {
+        "priority" => priority.as_ref().map(get),
+        "flex" => flex.as_ref().map(get),
         _ => None,
     };
     // Layers: the base prices, then each context tier that the input is above, from low to
@@ -526,11 +528,16 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
     let input_total: i64 = tokens[..8].iter().sum();
     let mut contexts: Vec<&ContextTier> = prices.context_tiers.iter().filter(|t| input_total > t.above).collect();
     contexts.sort_by_key(|t| t.above);
-    let mut layers = vec![(prices.standard.values(), tiered(&prices.priority, &prices.flex))];
+    // In the base prices, reasoning without its own price is priced like output in each
+    // service tier; a context tier changes reasoning only when it lists it.
+    let mut layers = vec![(
+        prices.standard.effective(),
+        tiered(&prices.priority, &prices.flex, TokenPrices::effective),
+    )];
     layers.extend(
         contexts
             .iter()
-            .map(|t| (t.standard.values(), tiered(&t.priority, &t.flex))),
+            .map(|t| (t.standard.values(), tiered(&t.priority, &t.flex, TokenPrices::values))),
     );
     let mut effective = [None; 12];
     let mut from_standard = [false; 12];

@@ -264,13 +264,32 @@ fn openrouter_tokens(pricing: &Value) -> TokenPrices {
     }
 }
 
+/// Checks that an OpenRouter model list has the expected content: every model has an id and
+/// prices.
+pub fn check_openrouter(list: &Value) -> anyhow::Result<()> {
+    let Some(models) = list["data"].as_array() else {
+        bail!("The list has not the expected content.");
+    };
+    if models
+        .iter()
+        .any(|m| !m["id"].is_string() || !m["pricing"]["prompt"].is_string())
+    {
+        bail!("A model in the list has no id or no prices.");
+    }
+    Ok(())
+}
+
 /// OpenRouter model lists (chat and embedding models). `-1` means a price that changes per
 /// request; such models get a variable price, so that no other list prices them.
 pub fn parse_openrouter(lists: &[Value]) -> anyhow::Result<BTreeMap<String, Prices>> {
-    if lists.iter().any(|list| !list["data"].is_array())
-        || lists.first().is_none_or(|l| l["data"] == Value::Array(Vec::new()))
+    for list in lists {
+        check_openrouter(list)?;
+    }
+    if lists
+        .first()
+        .is_none_or(|list| list["data"] == Value::Array(Vec::new()))
     {
-        bail!("The list has not the expected content.");
+        bail!("The list has no models.");
     }
     let mut out = BTreeMap::new();
     for model in lists
