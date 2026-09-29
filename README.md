@@ -78,7 +78,7 @@ To update:
 docker compose pull && docker compose up -d
 ```
 
-The image is `ghcr.io/beeltec/aiproxy`. The tag `main` follows the main branch, `sha-<commit>` marks each commit, and releases have version tags such as `0.1.0` and `0.1`.
+The image is `ghcr.io/beeltec/aiproxy`. The tag `latest` is the newest release, and releases also have version tags such as `0.1.0` and `0.1`. The tag `main` follows the main branch, and `sha-<commit>` marks each commit.
 
 ## Usage
 
