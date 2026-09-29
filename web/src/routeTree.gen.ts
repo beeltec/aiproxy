@@ -17,9 +17,11 @@ import { Route as AppAdminsRouteImport } from './routes/_app/admins'
 import { Route as AppAliasesRouteImport } from './routes/_app/aliases'
 import { Route as AppApiKeysRouteImport } from './routes/_app/api-keys'
 import { Route as AppConnectionsRouteImport } from './routes/_app/connections'
+import { Route as AppPricingRouteImport } from './routes/_app/pricing'
 import { Route as AppSecurityRouteImport } from './routes/_app/security'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppSubscriptionsRouteImport } from './routes/_app/subscriptions'
+import { Route as AppUsageRouteImport } from './routes/_app/usage'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -60,6 +62,11 @@ const AppConnectionsRoute = AppConnectionsRouteImport.update({
   path: '/connections',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPricingRoute = AppPricingRouteImport.update({
+  id: '/pricing',
+  path: '/pricing',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSecurityRoute = AppSecurityRouteImport.update({
   id: '/security',
   path: '/security',
@@ -75,6 +82,11 @@ const AppSubscriptionsRoute = AppSubscriptionsRouteImport.update({
   path: '/subscriptions',
   getParentRoute: () => AppRoute,
 } as any)
+const AppUsageRoute = AppUsageRouteImport.update({
+  id: '/usage',
+  path: '/usage',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -84,9 +96,11 @@ export interface FileRoutesByFullPath {
   '/aliases': typeof AppAliasesRoute
   '/api-keys': typeof AppApiKeysRoute
   '/connections': typeof AppConnectionsRoute
+  '/pricing': typeof AppPricingRoute
   '/security': typeof AppSecurityRoute
   '/settings': typeof AppSettingsRoute
   '/subscriptions': typeof AppSubscriptionsRoute
+  '/usage': typeof AppUsageRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -95,9 +109,11 @@ export interface FileRoutesByTo {
   '/aliases': typeof AppAliasesRoute
   '/api-keys': typeof AppApiKeysRoute
   '/connections': typeof AppConnectionsRoute
+  '/pricing': typeof AppPricingRoute
   '/security': typeof AppSecurityRoute
   '/settings': typeof AppSettingsRoute
   '/subscriptions': typeof AppSubscriptionsRoute
+  '/usage': typeof AppUsageRoute
   '/': typeof AppIndexRoute
 }
 export interface FileRoutesById {
@@ -109,9 +125,11 @@ export interface FileRoutesById {
   '/_app/aliases': typeof AppAliasesRoute
   '/_app/api-keys': typeof AppApiKeysRoute
   '/_app/connections': typeof AppConnectionsRoute
+  '/_app/pricing': typeof AppPricingRoute
   '/_app/security': typeof AppSecurityRoute
   '/_app/settings': typeof AppSettingsRoute
   '/_app/subscriptions': typeof AppSubscriptionsRoute
+  '/_app/usage': typeof AppUsageRoute
   '/_app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
@@ -124,9 +142,11 @@ export interface FileRouteTypes {
     | '/aliases'
     | '/api-keys'
     | '/connections'
+    | '/pricing'
     | '/security'
     | '/settings'
     | '/subscriptions'
+    | '/usage'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -135,9 +155,11 @@ export interface FileRouteTypes {
     | '/aliases'
     | '/api-keys'
     | '/connections'
+    | '/pricing'
     | '/security'
     | '/settings'
     | '/subscriptions'
+    | '/usage'
     | '/'
   id:
     | '__root__'
@@ -148,9 +170,11 @@ export interface FileRouteTypes {
     | '/_app/aliases'
     | '/_app/api-keys'
     | '/_app/connections'
+    | '/_app/pricing'
     | '/_app/security'
     | '/_app/settings'
     | '/_app/subscriptions'
+    | '/_app/usage'
     | '/_app/'
   fileRoutesById: FileRoutesById
 }
@@ -218,6 +242,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppConnectionsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/pricing': {
+      id: '/_app/pricing'
+      path: '/pricing'
+      fullPath: '/pricing'
+      preLoaderRoute: typeof AppPricingRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/security': {
       id: '/_app/security'
       path: '/security'
@@ -239,6 +270,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSubscriptionsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/usage': {
+      id: '/_app/usage'
+      path: '/usage'
+      fullPath: '/usage'
+      preLoaderRoute: typeof AppUsageRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -247,9 +285,11 @@ interface AppRouteChildren {
   AppAliasesRoute: typeof AppAliasesRoute
   AppApiKeysRoute: typeof AppApiKeysRoute
   AppConnectionsRoute: typeof AppConnectionsRoute
+  AppPricingRoute: typeof AppPricingRoute
   AppSecurityRoute: typeof AppSecurityRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppSubscriptionsRoute: typeof AppSubscriptionsRoute
+  AppUsageRoute: typeof AppUsageRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
@@ -258,9 +298,11 @@ const AppRouteChildren: AppRouteChildren = {
   AppAliasesRoute: AppAliasesRoute,
   AppApiKeysRoute: AppApiKeysRoute,
   AppConnectionsRoute: AppConnectionsRoute,
+  AppPricingRoute: AppPricingRoute,
   AppSecurityRoute: AppSecurityRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppSubscriptionsRoute: AppSubscriptionsRoute,
+  AppUsageRoute: AppUsageRoute,
   AppIndexRoute: AppIndexRoute,
 }
 

@@ -13,7 +13,7 @@ use crate::state::AppState;
 const BATCH: i64 = 500;
 
 #[derive(Clone, Debug, Default, Serialize, ToSchema)]
-pub struct Status {
+pub struct RecomputeStatus {
     pub running: bool,
     /// Unix seconds of the time range.
     pub from: Option<i64>,
@@ -27,14 +27,14 @@ pub struct Status {
 }
 
 #[derive(Default)]
-pub struct Recompute(Mutex<Status>);
+pub struct Recompute(Mutex<RecomputeStatus>);
 
 impl Recompute {
-    pub fn status(&self) -> Status {
+    pub fn status(&self) -> RecomputeStatus {
         self.0.lock().expect("recompute lock").clone()
     }
 
-    fn update(&self, change: impl FnOnce(&mut Status)) {
+    fn update(&self, change: impl FnOnce(&mut RecomputeStatus)) {
         change(&mut self.0.lock().expect("recompute lock"));
     }
 }
@@ -62,12 +62,12 @@ pub fn start(state: &AppState, from: i64, to: i64, models: Vec<String>) -> bool 
         if status.running {
             return false;
         }
-        *status = Status {
+        *status = RecomputeStatus {
             running: true,
             from: Some(from),
             to: Some(to),
             started_at: Some(now()),
-            ..Status::default()
+            ..RecomputeStatus::default()
         };
     }
     let state = state.clone();

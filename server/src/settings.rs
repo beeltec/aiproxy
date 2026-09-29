@@ -14,7 +14,9 @@ pub struct Settings {
     pub refresh: RefreshSchedule,
     pub failover: Failover,
     /// The price sync from the public price lists.
+    /// Settings saved before the price sync existed have none.
     #[serde(default = "default_price_sync")]
+    #[schema(required = true)]
     pub price_sync: RefreshSchedule,
 }
 

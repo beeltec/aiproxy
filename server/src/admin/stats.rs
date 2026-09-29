@@ -54,7 +54,7 @@ pub struct StatsRequest {
 
 /// Sums of usage rows. Requests count distinct request ids.
 #[derive(Serialize, ToSchema, Default)]
-pub struct Totals {
+pub struct StatsTotals {
     requests: i64,
     /// Requests with an error status.
     errors: i64,
@@ -74,7 +74,7 @@ pub struct Totals {
 
 /// One bucket of a group.
 #[derive(Serialize, ToSchema, Default, Clone)]
-pub struct Point {
+pub struct StatsPoint {
     requests: i64,
     input_tokens: i64,
     output_tokens: i64,
@@ -82,13 +82,13 @@ pub struct Point {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct Group {
+pub struct StatsGroup {
     /// The group value: API key id, model name, `chatgpt:<id>`, `connection:<id>` or `all`.
     key: String,
     label: String,
-    totals: Totals,
+    totals: StatsTotals,
     /// One point per bucket.
-    series: Vec<Point>,
+    series: Vec<StatsPoint>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -96,11 +96,11 @@ pub struct StatsResponse {
     bucket: String,
     /// Bucket starts, unix seconds. The first bucket starts at `from`, the last ends at `to`.
     buckets: Vec<i64>,
-    totals: Totals,
+    totals: StatsTotals,
     /// Requests that the gateway refused before routing (keys, limits), per reason.
     rejected: BTreeMap<String, i64>,
     /// Groups by calculated cost, highest first.
-    groups: Vec<Group>,
+    groups: Vec<StatsGroup>,
 }
 
 /// The unix time of a local time. A local time in a clock change gap moves to the next hour.
@@ -188,15 +188,15 @@ fn push_sums(query: &mut QueryBuilder<Sqlite>) {
     }
 }
 
-fn aggregate(row: &SqliteRow, start: usize) -> Result<Totals, sqlx::Error> {
-    let mut totals = Totals {
+fn aggregate(row: &SqliteRow, start: usize) -> Result<StatsTotals, sqlx::Error> {
+    let mut totals = StatsTotals {
         requests: row.try_get(start)?,
         errors: row.try_get(start + 1)?,
         cost_nano: row.try_get(start + 2)?,
         reported_cost_nano: row.try_get(start + 3)?,
         unpriced: row.try_get::<Option<i64>, _>(start + 4)?.unwrap_or(0),
         incomplete: row.try_get::<Option<i64>, _>(start + 5)?.unwrap_or(0),
-        ..Totals::default()
+        ..StatsTotals::default()
     };
     let amounts = start + 6;
     let costs = amounts + CATEGORIES.len();
@@ -280,7 +280,12 @@ async fn labels(state: &AppState, group: &str, keys: &[String]) -> Result<HashMa
         "none" => {
             out.insert("all".into(), "All requests".into());
         }
-        _ => {}
+        // The image-generation tool reports its image model without a connection name.
+        _ => {
+            for key in keys.iter().filter(|key| !key.contains('/')) {
+                out.insert(key.clone(), format!("{key} (image tool)"));
+            }
+        }
     }
     // Rows of deleted accounts or connections keep only their kind.
     for key in keys {
@@ -295,7 +300,7 @@ fn validate(req: &StatsRequest) -> ApiResult<(Tz, &'static str)> {
     }
     let tz = settings::time_zone(&req.time_zone).map_err(ApiError::bad_request)?;
     if !["key", "model", "upstream", "none"].contains(&req.group.as_str()) {
-        return Err(ApiError::bad_request("Group by key, model, upstream or none."));
+        return Err(ApiError::bad_request("StatsGroup by key, model, upstream or none."));
     }
     let bucket = match req.bucket.as_deref() {
         None | Some("") => auto_bucket(req.from, req.to),
@@ -311,7 +316,7 @@ fn validate(req: &StatsRequest) -> ApiResult<(Tz, &'static str)> {
     Ok((tz, bucket))
 }
 
-/// Totals, a series per group and bucket, and the cost per category. Buckets have local
+/// StatsTotals, a series per group and bucket, and the cost per category. Buckets have local
 /// borders in the time zone of the request.
 #[utoipa::path(post, path = "/stats", tag = "stats", request_body = StatsRequest, responses(
     (status = OK, body = StatsResponse),
@@ -331,7 +336,7 @@ async fn stats(
     }
     let group = group_expression(&req.group);
 
-    // Totals of the whole range.
+    // StatsTotals of the whole range.
     let mut query = QueryBuilder::new("SELECT ");
     push_sums(&mut query);
     query.push(" FROM usage u");
@@ -339,14 +344,14 @@ async fn stats(
     let row = query.build().fetch_one(&state.db).await?;
     let totals = aggregate(&row, 0)?;
 
-    // Totals per group.
+    // StatsTotals per group.
     let mut query = QueryBuilder::new(format!("SELECT {group}, "));
     push_sums(&mut query);
     query.push(" FROM usage u");
     push_filters(&mut query, &req);
     query.push(" GROUP BY 1");
     let rows = query.build().fetch_all(&state.db).await?;
-    let mut groups: Vec<(String, Totals)> = Vec::with_capacity(rows.len());
+    let mut groups: Vec<(String, StatsTotals)> = Vec::with_capacity(rows.len());
     for row in &rows {
         groups.push((row.try_get(0)?, aggregate(row, 1)?));
     }
@@ -375,15 +380,15 @@ async fn stats(
     push_filters(&mut query, &req);
     query.push(" GROUP BY 1, 2");
     let rows = query.build().fetch_all(&state.db).await?;
-    let mut series: HashMap<String, Vec<Point>> = HashMap::new();
+    let mut series: HashMap<String, Vec<StatsPoint>> = HashMap::new();
     for row in &rows {
         let index: i64 = row.try_get(0)?;
         let key: String = row.try_get(1)?;
         let points = series
             .entry(key)
-            .or_insert_with(|| vec![Point::default(); starts.len()]);
+            .or_insert_with(|| vec![StatsPoint::default(); starts.len()]);
         if let Some(point) = points.get_mut(index as usize) {
-            *point = Point {
+            *point = StatsPoint {
                 requests: row.try_get(2)?,
                 input_tokens: row.try_get(3)?,
                 output_tokens: row.try_get(4)?,
@@ -394,13 +399,13 @@ async fn stats(
 
     let keys: Vec<String> = groups.iter().map(|(key, _)| key.clone()).collect();
     let labels = labels(&state, &req.group, &keys).await?;
-    let mut groups: Vec<Group> = groups
+    let mut groups: Vec<StatsGroup> = groups
         .into_iter()
-        .map(|(key, totals)| Group {
+        .map(|(key, totals)| StatsGroup {
             label: labels.get(&key).cloned().unwrap_or_else(|| key.clone()),
             series: series
                 .remove(&key)
-                .unwrap_or_else(|| vec![Point::default(); starts.len()]),
+                .unwrap_or_else(|| vec![StatsPoint::default(); starts.len()]),
             key,
             totals,
         })
