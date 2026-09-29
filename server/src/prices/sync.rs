@@ -55,8 +55,17 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         fetch(http, OPENROUTER[0]),
         fetch(http, OPENROUTER[1]),
     );
-    // The capability checks use the same lists.
+    // The capability checks use the same lists: the stored model data of the connections is
+    // loaded again with them (admin changes to capabilities stay).
     catalog::store(state, models_dev.as_ref().ok(), litellm.as_ref().ok());
+    let connections: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections")
+        .fetch_all(&state.db)
+        .await?;
+    for connection in connections {
+        if let Err(err) = crate::connections::models::sync(state, connection).await {
+            tracing::warn!(connection, error = %err, "cannot load the connection models");
+        }
+    }
 
     // Without the embedding list, the chat models still get their prices, but no price ends
     // and the status shows the error.

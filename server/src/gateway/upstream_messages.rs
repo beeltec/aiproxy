@@ -1169,6 +1169,7 @@ impl Decoder for MessagesDecoder {
             steps.push(Step {
                 tokens: partial,
                 extras: Extras::from_usage(&self.usage),
+                service_tier: self.usage["service_tier"].as_str().map(str::to_owned),
                 estimated: true,
             });
         }

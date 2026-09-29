@@ -56,14 +56,22 @@ impl TokenPrices {
             6 => self.cache_write_5m,
             7 => self.cache_write_1h,
             8 => self.output_text,
-            9 => self.output_reasoning.or(self.output_text),
+            9 => self.output_reasoning,
             10 => self.output_audio,
             _ => self.output_image,
         }
     }
 
+    /// The prices as listed (reasoning without the output price).
     fn values(&self) -> [Option<f64>; 12] {
         std::array::from_fn(|category| self.get(category))
+    }
+
+    /// The prices with the output price for reasoning when it has none.
+    fn effective(&self) -> [Option<f64>; 12] {
+        let mut values = self.values();
+        values[9] = values[9].or(values[8]);
+        values
     }
 
     pub fn is_empty(&self) -> bool {
@@ -431,11 +439,6 @@ impl PriceBook {
                     ..cost
                 }
             }
-            None if nothing_used(input) => Cost {
-                nano: Some(0),
-                complete: input.usage_status != "estimated",
-                ..Cost::default()
-            },
             None => Cost::default(),
         }
     }
@@ -460,15 +463,6 @@ fn undated(model: &str) -> Option<String> {
         return Some(model[..n - 9].to_owned());
     }
     model.strip_suffix("-codex").map(str::to_owned)
-}
-
-fn nothing_used(input: &CostInput) -> bool {
-    input.tokens().iter().all(|n| *n == 0)
-        && input.web_search_calls == 0
-        && input.web_search_preview_calls == 0
-        && input.images_generated == 0
-        && input.characters == 0
-        && input.seconds.is_none_or(|s| s <= 0.0)
 }
 
 fn nano(usd: f64) -> i64 {
@@ -529,15 +523,22 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
             }
         }
     }
+    // Reasoning without its own price uses the output price (after the layers, so that a
+    // layer changes only what it lists).
+    if effective[9].is_none() {
+        effective[9] = effective[8];
+        from_standard[9] = from_standard[8];
+    }
     // Anthropic fast mode.
     if input.speed.as_deref() == Some("fast") {
         match (&prices.fast, prices.fast_multiplier) {
             (Some(fast), _) => {
+                let fast = fast.effective();
                 for (category, price) in effective.iter_mut().enumerate() {
-                    if tokens[category] > 0 && fast.get(category).is_none() {
+                    if tokens[category] > 0 && fast[category].is_none() {
                         complete = false;
                     }
-                    *price = fast.get(category).or(*price);
+                    *price = fast[category].or(*price);
                 }
             }
             (None, Some(multiplier)) => {

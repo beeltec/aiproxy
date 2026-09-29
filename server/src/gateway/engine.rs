@@ -631,7 +631,11 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         first.tokens.inexact |= outcome.searches_uncounted;
     }
     // Each step keeps its own facts; the reported cost is for the whole request.
-    let (row_tokens, row_status, row_extras) = match steps.first() {
+    let service_tier_reported = outcome
+        .service_tier
+        .clone()
+        .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned));
+    let (row_tokens, row_status, row_extras, row_tier) = match steps.first() {
         Some(first) => (
             first.tokens.clone(),
             if first.estimated { "estimated" } else { usage_status },
@@ -639,8 +643,9 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
                 reported_cost_nano: extras.reported_cost_nano,
                 ..first.extras.clone()
             },
+            first.service_tier.clone().or_else(|| service_tier_reported.clone()),
         ),
-        None => (tokens, usage_status, extras),
+        None => (tokens, usage_status, extras, service_tier_reported.clone()),
     };
     // Prices differ per search tool; a request has one of them.
     let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -667,10 +672,7 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         resolved_model: Some(job.route.qualified.clone()),
         effort: job.body["reasoning"]["effort"].as_str().map(str::to_owned),
         service_tier_requested: job.body["service_tier"].as_str().map(str::to_owned),
-        service_tier_reported: outcome
-            .service_tier
-            .clone()
-            .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
+        service_tier_reported: row_tier,
         streamed: job.stream,
         status_code,
         error_kind,
@@ -711,6 +713,7 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
             component: "iteration",
             first_token_ms: None,
             usage_status: if step.estimated { "estimated" } else { usage_status },
+            service_tier_reported: step.service_tier.or_else(|| service_tier_reported.clone()),
             tokens: step.tokens,
             web_search_calls: 0,
             web_search_preview_calls: 0,

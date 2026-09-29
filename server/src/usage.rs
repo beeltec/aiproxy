@@ -176,6 +176,8 @@ pub struct Step {
     pub tokens: Tokens,
     /// The facts of the answer that the step belongs to (speed, geography).
     pub extras: Extras,
+    /// The service tier that the answer of the step reported.
+    pub service_tier: Option<String>,
     /// The final usage of the step is missing; its tokens are estimated.
     pub estimated: bool,
 }
@@ -186,9 +188,11 @@ impl Step {
     /// step.
     pub fn anthropic(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
         let extras = Extras::from_usage(usage);
+        let service_tier = usage["service_tier"].as_str().map(str::to_owned);
         let step = |tokens| Self {
             tokens,
             extras: extras.clone(),
+            service_tier: service_tier.clone(),
             estimated: false,
         };
         match usage["iterations"].as_array().filter(|steps| !steps.is_empty()) {
