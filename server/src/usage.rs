@@ -182,23 +182,45 @@ pub struct Step {
     pub estimated: bool,
 }
 
+/// The most steps (rows) of one answer.
+const MAX_STEPS: usize = 64;
+
+/// A short text field of a usage object; a long one is not a valid value.
+pub fn short_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 32)
+        .map(str::to_owned)
+}
+
 impl Step {
     /// The steps of an Anthropic answer. With `iterations` (compaction), each step has its own
     /// usage, and the top-level usage leaves some steps out. Without them, the answer is one
     /// step.
     pub fn anthropic(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
         let extras = Extras::from_usage(usage);
-        let service_tier = usage["service_tier"].as_str().map(str::to_owned);
+        let service_tier = short_text(&usage["service_tier"]);
         let step = |tokens| Self {
             tokens,
             extras: extras.clone(),
             service_tier: service_tier.clone(),
             estimated: false,
         };
-        match usage["iterations"].as_array().filter(|steps| !steps.is_empty()) {
-            Some(steps) => steps.iter().map(|s| step(Tokens::from_anthropic(s, ttl))).collect(),
-            None => vec![step(Tokens::from_anthropic(usage, ttl))],
+        let Some(iterations) = usage["iterations"].as_array().filter(|steps| !steps.is_empty()) else {
+            return vec![step(Tokens::from_anthropic(usage, ttl))];
+        };
+        // Iterations after the limit go into the last step, so the total stays the same.
+        let mut steps: Vec<Self> = iterations
+            .iter()
+            .take(MAX_STEPS)
+            .map(|s| step(Tokens::from_anthropic(s, ttl)))
+            .collect();
+        if let Some(last) = steps.last_mut() {
+            for iteration in iterations.iter().skip(MAX_STEPS) {
+                last.tokens.add(&Tokens::from_anthropic(iteration, ttl));
+            }
         }
+        steps
     }
 
     pub fn total(steps: &[Self]) -> Tokens {
@@ -224,11 +246,10 @@ pub struct Extras {
 impl Extras {
     /// Reads the facts of an OpenAI, OpenRouter or Anthropic usage object.
     pub fn from_usage(usage: &Value) -> Self {
-        let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
         let details = &usage["completion_tokens_details"];
         Self {
-            speed: text(&usage["speed"]),
-            inference_geo: text(&usage["inference_geo"]),
+            speed: short_text(&usage["speed"]),
+            inference_geo: short_text(&usage["inference_geo"]),
             reported_cost_nano: usage["cost"].as_f64().map(|usd| (usd * 1e9).round() as i64),
             accepted_prediction_tokens: details["accepted_prediction_tokens"].as_i64().unwrap_or(0).max(0),
             rejected_prediction_tokens: details["rejected_prediction_tokens"].as_i64().unwrap_or(0).max(0),

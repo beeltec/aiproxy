@@ -13,7 +13,7 @@ use super::provider::Decoder;
 use super::routing::{Alias, Route};
 use crate::crypto::random_token;
 use crate::db::now;
-use crate::usage::{Extras, Step, Tokens};
+use crate::usage::{Extras, Step, Tokens, short_text};
 
 /// Anthropic thinking blocks go to Responses clients inside encrypted reasoning with this prefix.
 const THINKING_PREFIX: &str = "aipa1:";
@@ -1169,7 +1169,7 @@ impl Decoder for MessagesDecoder {
             steps.push(Step {
                 tokens: partial,
                 extras: Extras::from_usage(&self.usage),
-                service_tier: self.usage["service_tier"].as_str().map(str::to_owned),
+                service_tier: short_text(&self.usage["service_tier"]),
                 estimated: true,
             });
         }
