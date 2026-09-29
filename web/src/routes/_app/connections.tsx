@@ -821,6 +821,8 @@ function ModelRow({ model, onEdit }: { model: Model; onEdit: () => void }) {
 					size="sm"
 					aria-label={`Enable ${model.name}`}
 					checked={model.enabled}
+					// One save at a time, so an older save cannot win over a newer choice.
+					disabled={save.isPending}
 					onCheckedChange={(enabled) =>
 						save.mutate({
 							model,

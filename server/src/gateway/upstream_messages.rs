@@ -70,9 +70,11 @@ fn budget(effort: &str) -> i64 {
 fn apply_effort(body: &mut Value, effort: &str, client_max: Option<i64>, capabilities: &Value) {
     let model_max = capabilities["max_output"].as_i64();
     if effort == "none" {
-        // Some models always think; they reject `disabled`.
+        // Some models always think; they reject `disabled`, so they get the lowest effort.
         if capabilities["thinking_always_on"] != true {
             body["thinking"] = json!({ "type": "disabled" });
+        } else if capabilities["efforts"].as_array().is_some_and(|e| !e.is_empty()) {
+            body["output_config"]["effort"] = json!(anthropic_effort(effort, capabilities));
         }
         return;
     }
@@ -128,8 +130,11 @@ pub fn fit_thinking_budget(body: &mut Value) {
 fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) -> Result<(), &'static str> {
     let forced = matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool"));
     let thinking = body["thinking"]["type"].as_str();
-    let allowed = thinking == Some("adaptive") && capabilities["forced_tools_with_thinking"] == true;
     let always_on = capabilities["thinking_always_on"] == true;
+    // Without a thinking field, a model that always thinks uses adaptive thinking.
+    let adaptive = thinking == Some("adaptive")
+        || (thinking.is_none() && always_on && capabilities["thinking"]["adaptive"] == true);
+    let allowed = adaptive && capabilities["forced_tools_with_thinking"] == true;
     if !forced || allowed || !(always_on || matches!(thinking, Some("enabled" | "adaptive"))) {
         return Ok(());
     }
