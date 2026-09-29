@@ -24,7 +24,7 @@ jobs:
       cache: true
       cache-mode: max
       # Signing writes the image into the public Sigstore log; the repository is private.
-      sign: false
+      sign: "false"
       meta-images: ghcr.io/${{ github.repository }}
       meta-tags: |
         type=ref,event=branch

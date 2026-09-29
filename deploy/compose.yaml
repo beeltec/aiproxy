@@ -1,5 +1,6 @@
 # aiproxy behind Traefik. Copy this folder to the server, then:
-#   openssl rand -base64 32 > master.key && chmod 600 master.key
+#   openssl rand -base64 32 > master.key
+#   sudo chown 65532:65532 master.key && sudo chmod 400 master.key
 #   echo "AIPROXY_HOST=ai.example.com" > .env && echo "ACME_EMAIL=you@example.com" >> .env
 #   docker compose up -d
 #   docker compose exec aiproxy aiproxy setup-token
@@ -12,13 +13,18 @@ services:
   aiproxy:
     image: ghcr.io/beeltec/aiproxy:main
     restart: unless-stopped
+    # Only /data (and /tmp for SQLite) can be written.
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       AIPROXY_PUBLIC_URL: https://${AIPROXY_HOST:?set AIPROXY_HOST in .env}
       AIPROXY_MASTER_KEY_FILE: /run/secrets/master_key
       # Only Traefik may set X-Forwarded-For.
       AIPROXY_TRUSTED_PROXIES: 172.30.0.2
     secrets:
-      # A copy that only the user of the image (nonroot, 65532) can read.
+      # Only the user of the image (nonroot, 65532) may read the key. Older Compose versions
+      # mount the file as it is: then the host file must belong to 65532.
       - source: master_key
         uid: "65532"
         gid: "65532"
@@ -33,14 +39,18 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Running requests get 30 seconds to end and record their usage.
-    stop_grace_period: 45s
+    # At a stop, running requests get 30 seconds to end; then usage rows and renewed tokens
+    # are saved (up to 150 seconds more).
+    stop_grace_period: 200s
     labels:
       traefik.enable: "true"
       traefik.docker.network: aiproxy_proxy
       traefik.http.routers.aiproxy.rule: Host(`${AIPROXY_HOST}`)
       traefik.http.routers.aiproxy.entrypoints: websecure
       traefik.http.routers.aiproxy.tls.certresolver: letsencrypt
+      traefik.http.routers.aiproxy.middlewares: aiproxy-hsts
+      # Browsers use only HTTPS for this host for a year.
+      traefik.http.middlewares.aiproxy-hsts.headers.stsSeconds: "31536000"
       traefik.http.services.aiproxy.loadbalancer.server.port: "8080"
 
   traefik:

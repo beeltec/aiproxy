@@ -11,7 +11,8 @@ The image is `ghcr.io/beeltec/aiproxy`. The tag `main` follows the main branch; 
 ```sh
 mkdir aiproxy && cd aiproxy          # copy deploy/compose.yaml into this folder
 openssl rand -base64 32 > master.key
-chmod 600 master.key
+sudo chown 65532:65532 master.key    # the user in the image
+sudo chmod 400 master.key
 cat > .env <<'EOF'
 AIPROXY_HOST=ai.example.com
 ACME_EMAIL=you@example.com
