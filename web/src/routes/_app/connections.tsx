@@ -1203,8 +1203,8 @@ function CapabilityForm({
 				{kind === "anthropic" && (
 					<>
 						<Toggle
-							label="Forced tools with thinking"
-							description="Off: a forced tool choice turns thinking off for that request (or fails when the model always thinks)."
+							label="Forced tool choice"
+							description="Off: the model refuses requests that force a tool; they get a 400."
 							checked={draft.forcedTools}
 							onChange={(v) => set("forcedTools", v)}
 						/>

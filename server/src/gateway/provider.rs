@@ -115,9 +115,9 @@ impl Decoder for Identity {
             } else {
                 &data["error"]
             };
-            return Err(upstream_failure(
-                error["message"].as_str().unwrap_or("The upstream failed."),
-            ));
+            // An `error` event can have its message at the top level.
+            let message = error["message"].as_str().or_else(|| data["message"].as_str());
+            return Err(upstream_failure(message.unwrap_or("The upstream failed.")));
         }
         out.push(Event {
             kind,

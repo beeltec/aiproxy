@@ -7,7 +7,7 @@
 //! - `endpoints`: OpenAI endpoints (`chat`, `responses`); `chat_tools`: false when function tools
 //!   work only on Responses; `mode`: the LiteLLM mode (`chat`, `embedding`, ...)
 //! - `thinking`: Anthropic thinking types (`adaptive`, `enabled`); `forced_tools_with_thinking`
-//!   (false: forced tools do not work with adaptive thinking; unknown means they do);
+//!   (false: the model refuses forced tools on every request; unknown means it takes them);
 //!   `thinking_always_on`: the model cannot turn thinking off
 
 use std::time::Duration;

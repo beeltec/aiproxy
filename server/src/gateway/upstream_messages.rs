@@ -137,27 +137,19 @@ fn turn_thinking_off(body: &mut Value) {
     }
 }
 
-/// Forced tools (`any` or a named tool) do not work with manual thinking; adaptive thinking
-/// allows them, except on models with `forced_tools_with_thinking: false`. Thinking is turned
-/// off for such a request; a model that always thinks gets a 400 instead.
+/// Forced tools (`any` or a named tool) do not work with manual thinking, so it is turned off
+/// for such a request. Models with `forced_tools_with_thinking: false` refuse forced tools on
+/// every request; they get a 400.
 fn drop_thinking_for_forced_tools(body: &mut Value, capabilities: &Value) -> Result<(), &'static str> {
-    let forced = matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool"));
-    let always_on = capabilities["thinking_always_on"] == true;
-    let conflict = match body["thinking"]["type"].as_str() {
-        Some("enabled") => true,
-        Some("disabled") => false,
-        // Adaptive, or the model's default thinking.
-        _ => capabilities["forced_tools_with_thinking"] == false,
-    };
-    if !forced || !conflict {
+    if !matches!(body["tool_choice"]["type"].as_str(), Some("any" | "tool")) {
         return Ok(());
     }
-    if always_on {
-        return Err(
-            "This model always thinks, and it cannot use a forced tool choice with thinking. Use tool choice auto.",
-        );
+    if capabilities["forced_tools_with_thinking"] == false {
+        return Err("This model does not support a forced tool choice. Use tool choice auto.");
     }
-    turn_thinking_off(body);
+    if body["thinking"]["type"] == "enabled" {
+        turn_thinking_off(body);
+    }
     Ok(())
 }
 
@@ -697,6 +689,8 @@ pub struct MessagesDecoder {
     stopped: bool,
     /// Upstream answers that ended with their usage.
     answers: usize,
+    /// Characters streamed in the current upstream answer.
+    answer_chars: usize,
 }
 
 impl MessagesDecoder {
@@ -720,6 +714,7 @@ impl MessagesDecoder {
             service_tier: None,
             stopped: false,
             answers: 0,
+            answer_chars: 0,
         }
     }
 
@@ -1069,6 +1064,7 @@ impl MessagesDecoder {
     /// Adds the usage of one upstream answer to the total.
     fn add_usage(&mut self) {
         self.answers += 1;
+        self.answer_chars = 0;
         let tokens = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
         add_tokens(&mut self.total, &tokens);
         self.usage = Value::Null;
@@ -1119,7 +1115,13 @@ impl Decoder for MessagesDecoder {
                 }
             }
             "content_block_start" => self.start_block(out, position, &data["content_block"]),
-            "content_block_delta" => self.delta(out, position, &data["delta"]),
+            "content_block_delta" => {
+                let delta = &data["delta"];
+                for field in ["text", "thinking", "partial_json"] {
+                    self.answer_chars += delta[field].as_str().map_or(0, str::len);
+                }
+                self.delta(out, position, delta);
+            }
             "content_block_stop" => self.stop_block(out, position),
             "message_delta" => {
                 if let Some(reason) = data["delta"]["stop_reason"].as_str() {
@@ -1161,7 +1163,11 @@ impl Decoder for MessagesDecoder {
         }
         let mut total = self.total.clone();
         if self.usage.is_object() {
-            add_tokens(&mut total, &Tokens::from_anthropic(&self.usage, self.ttl.as_deref()));
+            let mut partial = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
+            // The final usage of the broken answer is missing: its streamed text counts at
+            // least (about 4 characters per token).
+            partial.output_text = partial.output_text.max((self.answer_chars / 4) as i64);
+            add_tokens(&mut total, &partial);
             total.inexact = true;
         }
         Some(total)
