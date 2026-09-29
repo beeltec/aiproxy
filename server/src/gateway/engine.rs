@@ -22,7 +22,7 @@ use crate::usage::{Row, Tokens};
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Longest time for one request.
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+pub(super) const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Events held before the attempt commits (then it commits anyway).
 const MAX_HELD_EVENTS: usize = 1000;
 const MAX_HELD_BYTES: usize = 1024 * 1024;

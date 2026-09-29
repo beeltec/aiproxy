@@ -1038,14 +1038,7 @@ impl MessagesDecoder {
     fn add_usage(&mut self) {
         self.answers += 1;
         let tokens = Tokens::from_anthropic(&self.usage, self.ttl.as_deref());
-        let t = &mut self.total;
-        t.input_text += tokens.input_text;
-        t.input_text_cached += tokens.input_text_cached;
-        t.cache_write_5m += tokens.cache_write_5m;
-        t.cache_write_1h += tokens.cache_write_1h;
-        t.output_text += tokens.output_text;
-        t.output_reasoning += tokens.output_reasoning;
-        t.inexact |= tokens.inexact;
+        add_tokens(&mut self.total, &tokens);
         self.usage = Value::Null;
     }
 
@@ -1053,6 +1046,16 @@ impl MessagesDecoder {
     fn paused(&self) -> bool {
         self.stopped && self.stop_reason.as_deref() == Some("pause_turn")
     }
+}
+
+fn add_tokens(total: &mut Tokens, tokens: &Tokens) {
+    total.input_text += tokens.input_text;
+    total.input_text_cached += tokens.input_text_cached;
+    total.cache_write_5m += tokens.cache_write_5m;
+    total.cache_write_1h += tokens.cache_write_1h;
+    total.output_text += tokens.output_text;
+    total.output_reasoning += tokens.output_reasoning;
+    total.inexact |= tokens.inexact;
 }
 
 /// Appends in place: a copy of the whole text per delta would make long streams quadratic.
@@ -1118,8 +1121,18 @@ impl Decoder for MessagesDecoder {
     }
 
     /// Unknown until the first upstream answer ended; then the engine estimates instead.
+    /// A continuation that broke off adds what its usage showed so far; the total is then not
+    /// exact.
     fn tokens(&self) -> Option<Tokens> {
-        (self.answers > 0).then(|| self.total.clone())
+        if self.answers == 0 {
+            return None;
+        }
+        let mut total = self.total.clone();
+        if self.usage.is_object() {
+            add_tokens(&mut total, &Tokens::from_anthropic(&self.usage, self.ttl.as_deref()));
+            total.inexact = true;
+        }
+        Some(total)
     }
 
     fn continuation(&mut self) -> Option<Vec<Value>> {

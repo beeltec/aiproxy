@@ -12,7 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::codex::error_text;
 use super::engine::{
-    Event, Failure, IDLE_TIMEOUT, Job, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, Outcome, limited_events, too_large,
+    Event, Failure, IDLE_TIMEOUT, Job, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, Outcome, TOTAL_TIMEOUT, limited_events,
+    too_large,
 };
 use super::{sse, upstream_chat, upstream_messages};
 use crate::connections::{Connection, Kind};
@@ -253,6 +254,10 @@ pub(super) async fn attempt(
                     Err(_) => continue,
                 };
                 decoder.push(&next.event, &data, &mut produced)?;
+                // During a continuation, a break must not lose the usage known so far.
+                if continuations > 0 {
+                    outcome.tokens = decoder.tokens();
+                }
             }
         }
         for mut event in produced {
@@ -379,7 +384,9 @@ async fn send(
     if !betas.is_empty() {
         request = request.header("anthropic-beta", betas.join(","));
     }
-    let response = tokio::time::timeout(HEADERS_TIMEOUT, request.send())
+    // Without streaming, a provider sends the headers only after the whole answer.
+    let limit = if stream { HEADERS_TIMEOUT } else { TOTAL_TIMEOUT };
+    let response = tokio::time::timeout(limit, request.send())
         .await
         .map_err(|_| {
             Failure::new(
