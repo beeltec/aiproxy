@@ -7,7 +7,7 @@ edition = "2024"
 aes-gcm = "0.11.1"
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie", "typed-header"] }
 base64 = "0.23.1"
 bytes = "1.12.1"
@@ -20,12 +20,13 @@ ipnet = "2.12.2"
 libc = "0.2.189"
 openssl = { version = "0.10.81", features = ["vendored"] }
 rand = "0.10.3"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "http2", "form", "query"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "http2", "form", "query", "multipart"] }
 rust-embed = { version = "8.12.0", features = ["mime-guess"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "json"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "isomp4", "mkv", "mp3", "mpa", "ogg", "wav"] }
 thiserror = "2.0.21"
 tiktoken-rs = "0.12.1"
 time = "0.3.55"

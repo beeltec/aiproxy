@@ -551,7 +551,7 @@ pub(super) async fn count_tokens(
 
 /// Maps an upstream error answer. A refused provider key is the gateway's problem, not the
 /// client's, so it becomes a 502.
-async fn error_answer(response: reqwest::Response) -> Failure {
+pub(super) async fn error_answer(response: reqwest::Response) -> Failure {
     let status = response.status();
     let retry_after = response
         .headers()
@@ -581,6 +581,20 @@ async fn error_answer(response: reqwest::Response) -> Failure {
     failure
 }
 
+/// OpenRouter fallbacks and provider routing would pick models that the key may not use.
+pub(super) fn check_openrouter_routing(body: &Value) -> Result<(), Failure> {
+    for field in ["models", "provider", "preset"] {
+        if !body[field].is_null() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` is not supported: it would skip the model list of the key."),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The client body with the upstream model name, the alias defaults, and the fields the
 /// gateway always sets.
 fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>), Failure> {
@@ -596,15 +610,8 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
             ));
         }
     }
-    // OpenRouter fallbacks and provider routing would pick models that the key may not use.
-    for field in ["models", "provider", "preset"] {
-        if kind == Kind::OpenRouter && !body[field].is_null() {
-            return Err(Failure::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                format!("`{field}` is not supported: it would skip the model list of the key."),
-            ));
-        }
+    if kind == Kind::OpenRouter {
+        check_openrouter_routing(&body)?;
     }
     // OpenRouter plugins are hosted tools; only its web search is allowed.
     let mut plugins = body["plugins"].as_array().into_iter().flatten();
