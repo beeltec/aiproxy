@@ -211,7 +211,9 @@ function ConnectionCard({
 						<span className="truncate font-medium">
 							{connection.display_name}
 						</span>
-						<Badge variant="outline">{kindLabel(connection.kind)}</Badge>
+						{connection.display_name !== kindLabel(connection.kind) && (
+							<Badge variant="outline">{kindLabel(connection.kind)}</Badge>
+						)}
 						{connection.last_error && (
 							<Badge variant="destructive">Model list failed</Badge>
 						)}

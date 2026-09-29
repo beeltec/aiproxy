@@ -651,14 +651,24 @@ fn translated_body(state: &AppState, job: &Job, wire: Wire, kind: Kind) -> Resul
     }
 }
 
-/// No stored state at the provider, encrypted reasoning for the next turn, and no reasoning
-/// that another provider made (OpenAI cannot read it).
+/// No stored state at the provider, encrypted reasoning for the next turn, the pages of web
+/// searches, and no reasoning that another provider made (OpenAI cannot read it).
 fn force_responses_fields(body: &mut Value) {
     super::codex::drop_foreign_reasoning(body.get_mut("input"));
     body["store"] = json!(false);
     let mut include: Vec<Value> = body["include"].as_array().cloned().unwrap_or_default();
-    if !include.iter().any(|v| v == "reasoning.encrypted_content") {
-        include.push(json!("reasoning.encrypted_content"));
+    let mut wanted = vec!["reasoning.encrypted_content"];
+    // Without this, OpenAI does not return the pages that a web search found.
+    let searches = body["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|t| t["type"].as_str().is_some_and(|k| k.starts_with("web_search"))));
+    if searches {
+        wanted.push("web_search_call.action.sources");
+    }
+    for value in wanted {
+        if !include.iter().any(|v| v == value) {
+            include.push(json!(value));
+        }
     }
     body["include"] = Value::Array(include);
 }
