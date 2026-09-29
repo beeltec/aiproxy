@@ -1,11 +1,12 @@
 //! Checks and routing that all client formats share.
 
 use axum::http::StatusCode;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::auth::{Admission, ApiKey};
 use super::engine::{Failure, Job};
-use super::routing::{self, Route, RouteError};
+use super::routing::{self, Alias, Route, RouteError, Upstream};
+use crate::connections::Kind;
 use crate::state::AppState;
 
 /// Output tokens reserved for the tokens-per-minute limit when the client sets no maximum.
@@ -17,16 +18,32 @@ pub struct Prepared {
     pub job: Job,
 }
 
+/// A client request in the Responses form, with the original body.
+pub struct Incoming<'a> {
+    /// `responses`, `chat` or `messages`: the route and the client format.
+    pub format: &'static str,
+    pub body: Value,
+    pub native: Value,
+    pub cache_hint: Option<&'a str>,
+    pub anthropic_beta: Option<&'a str>,
+    pub anthropic_version: Option<&'a str>,
+}
+
 /// Validates a Responses request body and builds the job.
 pub async fn prepare(
     state: &AppState,
     key: &ApiKey,
-    mut body: Value,
-    route_name: &'static str,
-    client_format: &'static str,
-    cache_hint: Option<&str>,
+    incoming: Incoming<'_>,
     permits: Admission,
 ) -> Result<Prepared, Failure> {
+    let Incoming {
+        format,
+        mut body,
+        native,
+        cache_hint,
+        anthropic_beta,
+        anthropic_version,
+    } = incoming;
     let bad = |message: &str| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message);
     let requested = body["model"]
         .as_str()
@@ -35,8 +52,62 @@ pub async fn prepare(
     reject_hosted_tools(&body)?;
     check_options(&body)?;
     let route = route(state, key, requested).await?;
+    let anthropic = matches!(
+        route.upstream,
+        Upstream::Connection {
+            kind: Kind::Anthropic,
+            ..
+        }
+    );
+    let builtin = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|tool| tool["type"] == "anthropic_builtin");
+    if let Some(tool) = builtin.filter(|_| !(anthropic && format == "messages")) {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            format!(
+                "The tool type `{}` works only with Anthropic models. Use a function tool with an input schema.",
+                tool["tool_type"].as_str().unwrap_or_default()
+            ),
+        ));
+    }
+    let preview = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "web_search_preview");
+    if preview && route.upstream == Upstream::ChatGpt {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            "ChatGPT models do not support `web_search_preview`. Use `web_search`.",
+        ));
+    }
+    // Anthropic can block search domains; the other upstreams cannot.
+    let blocked_domains = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| tool["type"] == "web_search" && !tool["blocked_domains"].is_null());
+    if blocked_domains && !(anthropic && format == "messages") {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_tool",
+            "Web search with `blocked_domains` works only with Anthropic models. Use `allowed_domains`.",
+        ));
+    }
     check_inputs(&body, &route.capabilities, &route.qualified)?;
-    clamp_effort(&mut body, &route.capabilities);
+    if let Some(alias) = &route.alias {
+        apply_alias(&mut body, alias, format);
+    }
+    // Anthropic efforts have other names; the Anthropic encoder maps them itself, and `none`
+    // must stay to turn thinking off.
+    if !anthropic {
+        clamp_effort(&mut body, &route.capabilities);
+    }
 
     let output_reserve = body["max_output_tokens"]
         .as_i64()
@@ -73,14 +144,22 @@ pub async fn prepare(
             key: key.clone(),
             route,
             body,
-            route_name,
-            client_format,
+            native,
+            anthropic_beta: anthropic_beta.map(str::to_owned),
+            anthropic_version: anthropic_version.filter(|v| is_api_version(v)).map(str::to_owned),
+            route_name: format,
+            client_format: format,
             stream,
             cache_key,
             reserved_tokens,
             _permits: permits,
         },
     })
+}
+
+/// An Anthropic API version such as `2023-06-01`.
+pub(super) fn is_api_version(version: &str) -> bool {
+    version.len() == 10 && version.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
 /// A body that is not valid JSON, as an error in the format of the client.
@@ -122,7 +201,7 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
             ));
         }
     };
-    if !routing::allowed(&key.allowlist, &route) {
+    if !routing::allowed(&key.allowlist, &route.qualified, &route.bare_names()) {
         state.rejected.count(super::rejected::Reason::NotAllowed);
         return Err(Failure::new(
             StatusCode::FORBIDDEN,
@@ -133,11 +212,38 @@ pub async fn route(state: &AppState, key: &ApiKey, requested: &str) -> Result<Ro
     Ok(route)
 }
 
+/// Alias defaults for values that the client did not set. Chat and Messages clients have no
+/// summary setting (their converters only put `auto`), so there the alias summary always wins.
+fn apply_alias(body: &mut Value, alias: &Alias, format: &str) {
+    if let Some(effort) = &alias.effort
+        && body["reasoning"]["effort"].is_null()
+    {
+        body["reasoning"]["effort"] = json!(effort);
+    }
+    if let Some(summary) = &alias.summary
+        && (body["reasoning"]["summary"].is_null() || format != "responses")
+    {
+        body["reasoning"]["summary"] = json!(summary);
+    }
+    if alias.fast && body["service_tier"].is_null() {
+        body["service_tier"] = json!("priority");
+    }
+}
+
 const EFFORTS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const SERVICE_TIERS: [&str; 6] = ["auto", "default", "flex", "scale", "priority", "fast"];
 
 /// Only known values reach the backend and the usage rows.
 fn check_options(body: &Value) -> Result<(), Failure> {
+    for field in ["reasoning", "text"] {
+        if !body[field].is_null() && !body[field].is_object() {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("`{field}` must be an object."),
+            ));
+        }
+    }
     let known = |value: &Value, list: &[&str]| value.is_null() || value.as_str().is_some_and(|v| list.contains(&v));
     if !known(&body["reasoning"]["effort"], &EFFORTS) {
         return Err(Failure::new(
@@ -185,8 +291,14 @@ fn clamp_effort(body: &mut Value, capabilities: &Value) {
 
 /// Hosted tools that the gateway allows. The others can reach provider-side objects (files,
 /// containers, connectors) through the shared account, and their charges are not tracked.
-/// The ChatGPT backend refuses `web_search_preview`.
-const HOSTED_TOOLS: [&str; 3] = ["function", "custom", "web_search"];
+/// `web_search_preview` works only on OpenAI connections (checked after routing).
+const HOSTED_TOOLS: [&str; 5] = [
+    "function",
+    "custom",
+    "web_search",
+    "web_search_preview",
+    "anthropic_builtin",
+];
 
 fn reject_hosted_tools(body: &Value) -> Result<(), Failure> {
     for tool in body["tools"].as_array().into_iter().flatten() {
@@ -220,7 +332,10 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
     let mut stored_reference = false;
     visit_parts(&body["input"], &mut |part| {
         let kind = part["type"].as_str().unwrap_or_default();
-        let provider_object = kind == "item_reference"
+        // An item with only an `id` is a reference too (its `type` is optional).
+        let id_only = part["type"].is_null() && part["role"].is_null() && !part["id"].is_null();
+        let provider_object = id_only
+            || kind == "item_reference"
             || (!part["file_id"].is_null() && kind.starts_with("input_"))
             || !part["container_id"].is_null()
             || kind.starts_with("code_interpreter")
@@ -251,6 +366,7 @@ fn check_inputs(body: &Value, capabilities: &Value, model: &str) -> Result<(), F
             "input_image" => "image",
             "input_file" => "file",
             "input_audio" => "audio",
+            "input_video" => "video",
             _ => return,
         };
         if !supports(needed) && missing.is_none() {

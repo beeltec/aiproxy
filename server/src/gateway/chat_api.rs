@@ -32,7 +32,21 @@ pub async fn create(
         Err(message) => return error(Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)),
     };
     let include_usage = body["stream_options"]["include_usage"].as_bool() == Some(true);
-    let prepared = match request::prepare(&state, &key, converted, "chat", "chat", None, admission).await {
+    let prepared = match request::prepare(
+        &state,
+        &key,
+        request::Incoming {
+            format: "chat",
+            body: converted,
+            native: body.clone(),
+            cache_hint: None,
+            anthropic_beta: None,
+            anthropic_version: None,
+        },
+        admission,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -188,6 +202,21 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     {
         out.insert("max_output_tokens".into(), json!(max));
     }
+    for field in ["temperature", "top_p"] {
+        if body[field].is_number() {
+            out.insert(field.into(), body[field].clone());
+        }
+    }
+    // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
+    match &body["stop"] {
+        Value::String(stop) => {
+            out.insert("stop".into(), json!([stop]));
+        }
+        Value::Array(stops) => {
+            out.insert("stop".into(), json!(stops));
+        }
+        _ => {}
+    }
     match body["response_format"]["type"].as_str() {
         Some("json_object") => {
             out.insert("text".into(), json!({ "format": { "type": "json_object" } }));
@@ -238,6 +267,12 @@ fn user_parts(content: &Value) -> Result<Vec<Value>, String> {
                 Ok(out)
             }
             "input_audio" => Ok(json!({ "type": "input_audio", "input_audio": part["input_audio"] })),
+            // Not a Responses part: only OpenRouter models with video input take it.
+            "video_url" => {
+                let video = &part["video_url"];
+                let url = video.as_str().or_else(|| video["url"].as_str()).unwrap_or_default();
+                Ok(json!({ "type": "input_video", "video_url": url }))
+            }
             "file" => {
                 let file = &part["file"];
                 if !file["file_id"].is_null() {
@@ -356,7 +391,8 @@ async fn collect(mut rx: tokio::sync::mpsc::Receiver<Msg>, model: &str) -> Respo
         match msg {
             Msg::Done(response) => return Json(from_response(&response, model)).into_response(),
             Msg::Failed(failure) => return error(failure),
-            Msg::Event(_) => {}
+            Msg::Native(body) => return Json(body).into_response(),
+            Msg::Event(_) | Msg::Raw(_) => {}
         }
     }
     error(Failure::new(
@@ -459,6 +495,7 @@ impl ChunkEncoder {
                 }
                 out.push(sse::frame(None, "[DONE]"));
             }
+            Msg::Raw(_) | Msg::Native(_) => {}
             Msg::Failed(failure) => {
                 let data =
                     json!({ "error": { "message": failure.message, "type": "server_error", "code": failure.code } });

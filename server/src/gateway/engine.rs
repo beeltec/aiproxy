@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::auth::{Admission, ApiKey};
 use super::codex::{self, SendError};
-use super::routing::Route;
+use super::provider;
+use super::routing::{Route, Upstream};
 use crate::chatgpt::refresh::{self, Trigger};
 use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
@@ -19,17 +20,17 @@ use crate::state::AppState;
 use crate::usage::{Row, Tokens};
 
 /// Longest time without any upstream event.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Longest time for one request.
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+pub(super) const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// Events held before the attempt commits (then it commits anyway).
 const MAX_HELD_EVENTS: usize = 1000;
 const MAX_HELD_BYTES: usize = 1024 * 1024;
 /// Upper bound for everything one upstream answer may send.
-const MAX_UPSTREAM_BYTES: usize = 64 * 1024 * 1024;
-const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_UPSTREAM_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 /// Upper bound for the output items kept for the final response.
-const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 /// Longest wait to give a late error to a client that does not read.
 const ERROR_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Refresh the access token when it expires within this time.
@@ -69,6 +70,10 @@ pub enum Msg {
     Done(Value),
     /// A failure after the start; the client already has a success status.
     Failed(Failure),
+    /// Native pass-through: one SSE frame as the upstream sent it.
+    Raw(bytes::Bytes),
+    /// Native pass-through without streaming: the upstream answer body.
+    Native(Value),
 }
 
 pub struct Job {
@@ -76,6 +81,12 @@ pub struct Job {
     pub route: Route,
     /// Responses request body from the client (before the backend adjustments).
     pub body: Value,
+    /// The body as the client sent it, for native pass-through.
+    pub native: Value,
+    /// The `anthropic-beta` header of an Anthropic client.
+    pub anthropic_beta: Option<String>,
+    /// The `anthropic-version` header of an Anthropic client.
+    pub anthropic_version: Option<String>,
     pub route_name: &'static str,
     pub client_format: &'static str,
     pub stream: bool,
@@ -106,18 +117,26 @@ pub async fn start(state: &AppState, job: Job) -> Result<mpsc::Receiver<Msg>, Fa
 }
 
 #[derive(Default)]
-struct Outcome {
-    status: u16,
-    error_kind: Option<String>,
-    account: Option<i64>,
-    final_response: Option<Value>,
-    first_token_ms: Option<i64>,
-    streamed_chars: usize,
-    attempts: i64,
+pub(super) struct Outcome {
+    pub status: u16,
+    pub error_kind: Option<String>,
+    pub account: Option<i64>,
+    pub final_response: Option<Value>,
+    /// Usage in billing categories, when the upstream format is not OpenAI's.
+    pub tokens: Option<Tokens>,
+    /// The service tier that a native Chat or Messages answer reported.
+    pub service_tier: Option<String>,
+    pub first_token_ms: Option<i64>,
+    pub streamed_chars: usize,
+    pub attempts: i64,
     /// Completed web searches, also known when the stream stops early.
-    web_search_calls: i64,
+    pub web_search_calls: i64,
     /// True after an upstream accepted the request, so tokens can be used.
-    generation_started: bool,
+    pub generation_started: bool,
+    /// Web searches may have run, but the upstream does not report their number.
+    pub searches_uncounted: bool,
+    /// The upstream format of a native stream: its errors go out in that format.
+    pub native_wire: Option<provider::Wire>,
 }
 
 async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failure>>, tx: mpsc::Sender<Msg>) {
@@ -127,14 +146,21 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
         status: 200,
         ..Outcome::default()
     };
-    let body = codex::backend_body(&job.body, &job.route.upstream_model, &job.cache_key);
+    let work = async {
+        match job.route.upstream {
+            Upstream::ChatGpt => {
+                let body = codex::backend_body(&job.body, &job.route.upstream_model, &job.cache_key);
+                attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started).await
+            }
+            Upstream::Connection { id, kind } => {
+                provider::attempt(&state, &job, id, kind, &mut opened, &tx, &mut outcome, started).await
+            }
+        }
+    };
 
     // Dropping the work future also stops the upstream request.
     let result = tokio::select! {
-        result = tokio::time::timeout(
-            TOTAL_TIMEOUT,
-            attempts(&state, &job, &body, &mut opened, &tx, &mut outcome, started),
-        ) => result.unwrap_or_else(|_| {
+        result = tokio::time::timeout(TOTAL_TIMEOUT, work) => result.unwrap_or_else(|_| {
             Err(Failure::new(StatusCode::GATEWAY_TIMEOUT, "timeout", "The request took longer than one hour."))
         }),
         () = tx.closed() => Err(client_closed()),
@@ -156,16 +182,28 @@ async fn run(state: AppState, job: Job, opened: oneshot::Sender<Result<(), Failu
                 let _ = opened.send(Err(failure));
             }
             None => {
-                let _ = tokio::time::timeout(ERROR_SEND_TIMEOUT, tx.send(Msg::Failed(failure))).await;
+                let send = async {
+                    match outcome.native_wire {
+                        Some(wire) => {
+                            for frame in provider::native_error(wire, &failure) {
+                                let _ = tx.send(Msg::Raw(frame)).await;
+                            }
+                        }
+                        None => {
+                            let _ = tx.send(Msg::Failed(failure)).await;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(ERROR_SEND_TIMEOUT, send).await;
             }
         }
     }
     record_usage(&state, &job, &outcome, started).await;
 }
 
-const CLIENT_CLOSED: &str = "client_closed";
+pub(super) const CLIENT_CLOSED: &str = "client_closed";
 
-fn client_closed() -> Failure {
+pub(super) fn client_closed() -> Failure {
     Failure::new(
         StatusCode::BAD_REQUEST,
         CLIENT_CLOSED,
@@ -349,19 +387,7 @@ async fn stream_events(
     outcome: &mut Outcome,
     started: Instant,
 ) -> StreamEnd {
-    use eventsource_stream::Eventsource;
-
-    // Stops the stream when the upstream sends more than the byte limit.
-    let mut received = 0usize;
-    let bytes = response.bytes_stream().map(move |chunk| {
-        let chunk = chunk?;
-        received += chunk.len();
-        if received > MAX_UPSTREAM_BYTES {
-            return Err(TooLarge.into());
-        }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(chunk)
-    });
-    let mut events = bytes.eventsource();
+    let mut events = limited_events(response);
     let mut held: Vec<Event> = Vec::new();
     let mut held_bytes = 0usize;
     let mut committed = false;
@@ -481,7 +507,30 @@ async fn stream_events(
     }
 }
 
-fn too_large(message: &str) -> Failure {
+/// The SSE events of an upstream answer. The stream fails when the upstream sends more than
+/// the byte limit.
+pub(super) fn limited_events(
+    response: reqwest::Response,
+) -> impl futures_util::Stream<
+    Item = Result<
+        eventsource_stream::Event,
+        eventsource_stream::EventStreamError<Box<dyn std::error::Error + Send + Sync>>,
+    >,
+> + Unpin {
+    use eventsource_stream::Eventsource;
+    let mut received = 0usize;
+    let bytes = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk?;
+        received += chunk.len();
+        if received > MAX_UPSTREAM_BYTES {
+            return Err(TooLarge.into());
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(chunk)
+    });
+    bytes.eventsource()
+}
+
+pub(super) fn too_large(message: &str) -> Failure {
     Failure::new(StatusCode::BAD_GATEWAY, "upstream_too_large", message)
 }
 
@@ -499,9 +548,10 @@ impl std::error::Error for TooLarge {}
 async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: Instant) {
     let response = outcome.final_response.as_ref();
     let usage = response.map(|r| &r["usage"]).filter(|u| u.is_object());
-    let (tokens, usage_status) = match usage {
-        Some(usage) => (Tokens::from_openai(usage), "reported"),
-        None if outcome.generation_started => (
+    let (tokens, usage_status) = match (&outcome.tokens, usage) {
+        (Some(tokens), _) => (tokens.clone(), "reported"),
+        (None, Some(usage)) => (Tokens::from_openai(usage), "reported"),
+        (None, None) if outcome.generation_started => (
             Tokens {
                 input_text: crate::tokens::estimate(&job.body).await as i64,
                 output_text: (outcome.streamed_chars / 4) as i64,
@@ -509,8 +559,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
             },
             "estimated",
         ),
-        None => (Tokens::default(), "none"),
+        (None, None) => (Tokens::default(), "none"),
     };
+    let mut tokens = tokens;
+    tokens.inexact |= outcome.searches_uncounted;
     // Without reported usage the real use is unknown, so keep at least the reservation.
     let used = match usage_status {
         "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
@@ -524,13 +576,24 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         api_key_id: job.key.id,
         route: job.route_name,
         client_format: job.client_format,
-        upstream: "chatgpt",
+        upstream: match job.route.upstream {
+            Upstream::ChatGpt => "chatgpt",
+            Upstream::Connection { kind, .. } => kind.as_str(),
+        },
         chatgpt_account_id: outcome.account,
+        connection_id: match job.route.upstream {
+            Upstream::ChatGpt => None,
+            Upstream::Connection { id, .. } => Some(id),
+        },
         requested_model: job.route.requested.clone(),
+        alias: job.route.alias.as_ref().map(|alias| alias.name.clone()),
         resolved_model: Some(job.route.qualified.clone()),
         effort: job.body["reasoning"]["effort"].as_str().map(str::to_owned),
         service_tier_requested: job.body["service_tier"].as_str().map(str::to_owned),
-        service_tier_reported: response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned),
+        service_tier_reported: outcome
+            .service_tier
+            .clone()
+            .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
         streamed: job.stream,
         status_code: outcome.status,
         error_kind: outcome.error_kind.clone(),

@@ -14,14 +14,16 @@ use serde_json::{Map, Value, json};
 use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, Msg};
 use super::error::{ErrorFormat, GatewayError};
-use super::{request, sse};
+use super::routing::Upstream;
+use super::{provider, request, sse};
+use crate::connections::Kind;
 use crate::db::now;
 use crate::state::AppState;
 use crate::usage::{Row, Tokens};
 
 /// OpenAI reasoning travels in the `signature` of an Anthropic thinking block with this prefix.
 /// Signatures without it come from Anthropic and are dropped.
-const SIGNATURE_PREFIX: &str = "aip1:";
+pub(super) const SIGNATURE_PREFIX: &str = "aip1:";
 
 pub async fn create(
     State(state): State<AppState>,
@@ -40,7 +42,21 @@ pub async fn create(
     };
     let show_thinking = body["thinking"]["display"].as_str() != Some("omitted");
     let hint = headers.get("x-claude-code-session-id").and_then(|v| v.to_str().ok());
-    let prepared = match request::prepare(&state, &key, converted, "messages", "messages", hint, admission).await {
+    let prepared = match request::prepare(
+        &state,
+        &key,
+        request::Incoming {
+            format: "messages",
+            body: converted,
+            native: body.clone(),
+            cache_hint: hint,
+            anthropic_beta: headers.get("anthropic-beta").and_then(|v| v.to_str().ok()),
+            anthropic_version: headers.get("anthropic-version").and_then(|v| v.to_str().ok()),
+        },
+        admission,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(failure) => return error(failure),
     };
@@ -63,9 +79,13 @@ pub async fn create(
 
 /// Local estimate: the Anthropic count needs an Anthropic model. It uses no generation
 /// allowance, but it has a usage row with zero tokens.
+/// A forwarded token count runs outside the engine, so it has its own total limit.
+const COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub async fn count_tokens(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
+    headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     let body = match body {
@@ -82,7 +102,33 @@ pub async fn count_tokens(
         Ok(route) => route,
         Err(failure) => return error(failure),
     };
-    let input_tokens = crate::tokens::estimate(&converted).await;
+    // Anthropic connections count themselves; other models get the local estimate.
+    let (result, upstream, connection_id) = match route.upstream {
+        Upstream::Connection {
+            id,
+            kind: Kind::Anthropic,
+        } => {
+            let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+            let version = header("anthropic-version").filter(|v| request::is_api_version(v));
+            let count = provider::count_tokens(
+                &state,
+                id,
+                &body,
+                &route.upstream_model,
+                header("anthropic-beta"),
+                version,
+            );
+            let result = tokio::time::timeout(COUNT_TIMEOUT, count).await.unwrap_or_else(|_| {
+                Err(Failure::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "The token count took too long.",
+                ))
+            });
+            (result, "anthropic", Some(id))
+        }
+        _ => (Ok(crate::tokens::estimate(&converted).await as i64), "local", None),
+    };
     state
         .usage
         .record(Row {
@@ -91,16 +137,18 @@ pub async fn count_tokens(
             api_key_id: key.id,
             route: "count_tokens",
             client_format: "messages",
-            upstream: "local",
+            upstream,
             chatgpt_account_id: None,
+            connection_id,
+            alias: route.alias.as_ref().map(|alias| alias.name.clone()),
             requested_model: route.requested,
             resolved_model: Some(route.qualified),
             effort: None,
             service_tier_requested: None,
             service_tier_reported: None,
             streamed: false,
-            status_code: 200,
-            error_kind: None,
+            status_code: result.as_ref().map_or_else(|f| f.status.as_u16(), |_| 200),
+            error_kind: result.as_ref().err().map(|f| f.code.to_owned()),
             latency_ms: started.elapsed().as_millis() as i64,
             first_token_ms: None,
             usage_status: "none",
@@ -109,7 +157,10 @@ pub async fn count_tokens(
             failover_attempts: 0,
         })
         .await;
-    Json(json!({ "input_tokens": input_tokens })).into_response()
+    match result {
+        Ok(input_tokens) => Json(json!({ "input_tokens": input_tokens })).into_response(),
+        Err(failure) => error(failure),
+    }
 }
 
 pub fn error(failure: Failure) -> Response {
@@ -198,11 +249,27 @@ pub fn to_responses(body: &Value) -> Result<Value, String> {
     if let Some(reasoning) = reasoning(body) {
         out.insert("reasoning".into(), reasoning);
     }
-    if body["speed"] == "fast" {
-        out.insert("service_tier".into(), json!("priority"));
+    // An explicit standard speed keeps a fast alias from applying.
+    match body["speed"].as_str() {
+        Some("fast") => {
+            out.insert("service_tier".into(), json!("priority"));
+        }
+        Some("standard") => {
+            out.insert("service_tier".into(), json!("default"));
+        }
+        _ => {}
     }
     if let Some(max) = body["max_tokens"].as_i64() {
         out.insert("max_output_tokens".into(), json!(max));
+    }
+    for field in ["temperature", "top_p"] {
+        if body[field].is_number() {
+            out.insert(field.into(), body[field].clone());
+        }
+    }
+    // Not a Responses field: Chat and Anthropic upstreams use it, Responses upstreams drop it.
+    if let Some(stops) = body["stop_sequences"].as_array() {
+        out.insert("stop".into(), json!(stops));
     }
     let format = &body["output_config"]["format"];
     match format["type"].as_str() {
@@ -264,9 +331,17 @@ fn tool(tool: &Value) -> Result<Value, String> {
     if kind.starts_with("web_search") {
         return web_search_tool(tool);
     }
+    // Client tools that Anthropic defines itself have no schema. They pass through only to
+    // Anthropic connections; the route check decides.
+    if ["bash_", "text_editor_", "computer_", "memory_"]
+        .iter()
+        .any(|p| kind.starts_with(p))
+    {
+        return Ok(json!({ "type": "anthropic_builtin", "name": tool["name"], "tool_type": kind }));
+    }
     if kind != "custom" {
         return Err(format!(
-            "The tool type `{kind}` works only with Anthropic models. Use a function tool with an input schema."
+            "The tool type `{kind}` is not supported. Use a function tool with an input schema."
         ));
     }
     Ok(json!({
@@ -280,11 +355,13 @@ fn tool(tool: &Value) -> Result<Value, String> {
 
 /// The backend search can only be limited to domains; it cannot block domains. `max_uses` has
 /// no backend equivalent, so it is not applied.
+/// Blocked domains stay in the tool; only native Anthropic requests may use them (see
+/// `request::prepare`).
 fn web_search_tool(tool: &Value) -> Result<Value, String> {
-    if tool["blocked_domains"].as_array().is_some_and(|list| !list.is_empty()) {
-        return Err("Web search with `blocked_domains` is not supported. Use `allowed_domains`.".into());
-    }
     let mut out = json!({ "type": "web_search" });
+    if let Some(domains) = tool["blocked_domains"].as_array().filter(|list| !list.is_empty()) {
+        out["blocked_domains"] = json!(domains);
+    }
     if let Some(domains) = tool["allowed_domains"].as_array().filter(|list| !list.is_empty()) {
         out["filters"] = json!({ "allowed_domains": domains });
     }
@@ -323,9 +400,7 @@ fn user_message(blocks: &[Value], input: &mut Vec<Value>) -> Result<(), String> 
                     .push(json!({ "type": "function_call_output", "call_id": block["tool_use_id"], "output": output }));
             }
             _ => {
-                if let Some(part) = content_part(block)? {
-                    parts.push(part);
-                }
+                parts.extend(content_part(block)?);
             }
         }
     }
@@ -356,7 +431,8 @@ fn tool_result_output(content: &Value) -> Result<Value, String> {
     Ok(Value::Array(parts))
 }
 
-fn content_part(block: &Value) -> Result<Option<Value>, String> {
+/// The Responses parts of one Anthropic block (none, one, or several for inline documents).
+fn content_part(block: &Value) -> Result<Vec<Value>, String> {
     let source = &block["source"];
     let data_url = || {
         format!(
@@ -365,7 +441,7 @@ fn content_part(block: &Value) -> Result<Option<Value>, String> {
             source["data"].as_str().unwrap_or_default()
         )
     };
-    Ok(match block["type"].as_str().unwrap_or_default() {
+    let part = match block["type"].as_str().unwrap_or_default() {
         "text" => Some(json!({ "type": "input_text", "text": block["text"] })),
         "image" => match source["type"].as_str() {
             Some("base64") => Some(json!({ "type": "input_image", "image_url": data_url() })),
@@ -379,13 +455,30 @@ fn content_part(block: &Value) -> Result<Option<Value>, String> {
                 "filename": block["title"].as_str().unwrap_or("document.pdf"),
             })),
             Some("text") => Some(json!({ "type": "input_text", "text": source["data"] })),
+            // Inline content: its blocks go through the same checks (a stored file in an image
+            // is refused like everywhere else).
+            Some("content") => match &source["content"] {
+                Value::String(text) => Some(json!({ "type": "input_text", "text": text })),
+                Value::Array(blocks) => {
+                    let mut parts = Vec::new();
+                    for nested in blocks {
+                        if !matches!(nested["type"].as_str(), Some("text" | "image")) {
+                            return Err("Inline documents can hold only text and image blocks.".into());
+                        }
+                        parts.extend(content_part(nested)?);
+                    }
+                    return Ok(parts);
+                }
+                _ => None,
+            },
             Some("url") => Some(json!({ "type": "input_file", "file_url": source["url"] })),
             _ => return Err("This document source is not supported.".into()),
         },
         "search_result" => Some(json!({ "type": "input_text", "text": block.to_string() })),
         // Thinking in a user turn does not exist; other blocks carry no content for the model.
         _ => None,
-    })
+    };
+    Ok(part.into_iter().collect())
 }
 
 fn assistant_message(blocks: &[Value], input: &mut Vec<Value>) {
@@ -612,7 +705,8 @@ async fn collect(mut rx: tokio::sync::mpsc::Receiver<Msg>, model: &str, show_thi
         match msg {
             Msg::Done(response) => return Json(from_response(&response, model, show_thinking)).into_response(),
             Msg::Failed(failure) => return error(failure),
-            Msg::Event(_) => {}
+            Msg::Native(body) => return Json(body).into_response(),
+            Msg::Event(_) | Msg::Raw(_) => {}
         }
     }
     error(Failure::new(
@@ -717,6 +811,7 @@ impl EventEncoder {
                 ));
                 out.push(Self::event("message_stop", json!({ "type": "message_stop" })));
             }
+            Msg::Raw(_) | Msg::Native(_) => {}
             Msg::Failed(failure) => {
                 let kind = match failure.status.as_u16() {
                     429 => "rate_limit_error",

@@ -37,6 +37,7 @@ pub fn backend_body(request: &Value, upstream_model: &str, cache_key: &str) -> V
         }
     }
     body.insert("model".into(), json!(upstream_model));
+    drop_foreign_reasoning(body.get_mut("input"));
     if let Some(Value::String(text)) = body.get("input") {
         let message =
             json!([{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] }]);
@@ -89,6 +90,17 @@ pub fn backend_body(request: &Value, upstream_model: &str, cache_key: &str) -> V
         body.remove("service_tier");
     }
     Value::Object(body)
+}
+
+/// Removes reasoning items that another provider made: their encrypted content carries a
+/// gateway prefix (`aipa1:` Anthropic, `aipo1:` OpenRouter) that OpenAI cannot read.
+pub fn drop_foreign_reasoning(input: Option<&mut Value>) {
+    if let Some(items) = input.and_then(Value::as_array_mut) {
+        items.retain(|item| {
+            let content = item["encrypted_content"].as_str().unwrap_or_default();
+            !(item["type"] == "reasoning" && (content.starts_with("aipa1:") || content.starts_with("aipo1:")))
+        });
+    }
 }
 
 /// The Codex CLI tells the backend the model and tier in this header.
@@ -161,7 +173,7 @@ pub async fn send(state: &AppState, account: i64, body: &Value) -> Result<reqwes
 }
 
 /// Reads at most 1 MB of an error body, within 30 s.
-async fn error_text(response: reqwest::Response) -> String {
+pub(super) async fn error_text(response: reqwest::Response) -> String {
     const LIMIT: usize = 1024 * 1024;
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();

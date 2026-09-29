@@ -6,11 +6,15 @@ mod codex;
 mod engine;
 mod error;
 mod messages_api;
+mod provider;
 mod rejected;
 mod request;
 mod responses_api;
-mod routing;
+pub mod routing;
 mod sse;
+mod thinking_cache;
+mod upstream_chat;
+mod upstream_messages;
 
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -20,10 +24,10 @@ use axum::{Json, Router, middleware};
 use serde_json::{Value, json};
 
 use auth::ApiKey;
-use routing::Route;
 
 pub use auth::KeyLimits;
 pub use rejected::RejectedCounter;
+pub use thinking_cache::ThinkingCache;
 
 use crate::state::AppState;
 
@@ -45,33 +49,20 @@ pub fn router(state: AppState) -> Router<AppState> {
 /// Enabled models that the key may use. Anthropic clients (with `anthropic-version`) get the
 /// Anthropic list shape.
 async fn list_models(State(state): State<AppState>, Extension(key): Extension<ApiKey>, headers: HeaderMap) -> Response {
-    let rows: Vec<(i64, String, String, Option<String>, String)> = match sqlx::query_as(
-        "SELECT id, source, upstream_id, display_name, capabilities FROM models WHERE enabled = 1
-         ORDER BY source, upstream_id",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows,
+    let listed = match routing::listed(&state.db).await {
+        Ok(listed) => listed,
         Err(err) => {
             tracing::error!(error = %err, "cannot list models");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let models: Vec<(String, String)> = rows
+    let models: Vec<(String, String)> = listed
         .into_iter()
-        .map(|(model_id, source, upstream_id, display_name, capabilities)| {
-            let route = Route {
-                requested: format!("{source}/{upstream_id}"),
-                qualified: format!("{source}/{upstream_id}"),
-                upstream_model: upstream_id.clone(),
-                model_id,
-                capabilities: serde_json::from_str(&capabilities).unwrap_or_default(),
-            };
-            (route, display_name.unwrap_or(upstream_id))
+        .filter(|model| {
+            let bare: Vec<&str> = model.bare.iter().map(String::as_str).collect();
+            routing::allowed(&key.allowlist, &model.qualified, &bare)
         })
-        .filter(|(route, _)| routing::allowed(&key.allowlist, route))
-        .map(|(route, name)| (route.qualified, name))
+        .map(|model| (model.name, model.display_name))
         .collect();
 
     if headers.contains_key("anthropic-version") {
@@ -87,7 +78,7 @@ async fn list_models(State(state): State<AppState>, Extension(key): Extension<Ap
     }
     let data: Vec<Value> = models
         .iter()
-        .map(|(id, _)| json!({ "id": id, "object": "model", "created": 0, "owned_by": id.split('/').next() }))
+        .map(|(id, _)| json!({ "id": id, "object": "model", "created": 0, "owned_by": id.split_once('/').map_or("aiproxy", |(owner, _)| owner) }))
         .collect();
     Json(json!({ "object": "list", "data": data })).into_response()
 }
