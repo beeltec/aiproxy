@@ -25,7 +25,7 @@ use crate::connections::{Connection, Kind};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Media, Row, Tokens};
+use crate::usage::{Extras, Media, Row, Tokens};
 
 /// A request that the gateway accepted, with what the usage row needs.
 #[derive(Clone)]
@@ -60,6 +60,8 @@ struct Recorded {
     media: Media,
     /// The answer has no usage: the estimate of the call replaces the tokens and media.
     unknown: bool,
+    /// The cost that the provider reported.
+    extras: Extras,
 }
 
 impl Recorded {
@@ -71,6 +73,7 @@ impl Recorded {
             tokens,
             media,
             unknown: false,
+            extras: Extras::default(),
         }
     }
 
@@ -91,6 +94,7 @@ impl Recorded {
             tokens: Tokens::default(),
             media: Media::default(),
             unknown: false,
+            extras: Extras::default(),
         }
     }
 
@@ -180,8 +184,10 @@ async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
         usage_status: recorded.usage_status,
         tokens: recorded.tokens,
         web_search_calls: 0,
+        web_search_preview_calls: 0,
         failover_attempts: 0,
         media: recorded.media,
+        extras: recorded.extras,
     };
     state.usage.record(row).await;
 }
@@ -607,7 +613,7 @@ pub async fn embeddings(
             Ok(answer) => answer,
             Err(failure) => return lost(failure),
         };
-        let recorded = match answer["usage"]["prompt_tokens"].as_i64() {
+        let mut recorded = match answer["usage"]["prompt_tokens"].as_i64() {
             Some(input) => {
                 let tokens = Tokens {
                     input_text: input,
@@ -617,6 +623,8 @@ pub async fn embeddings(
             }
             None => Recorded::unknown(),
         };
+        // OpenRouter reports its cost in the usage.
+        recorded.extras = Extras::from_usage(&answer["usage"]);
         (Json(answer).into_response(), Some(recorded))
     })
     .await

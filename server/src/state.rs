@@ -17,6 +17,8 @@ use crate::config::Config;
 use crate::connections::catalog::CatalogCache;
 use crate::crypto::{PasswordHasher, SecretBox};
 use crate::gateway::{KeyLimits, RejectedCounter, ThinkingCache};
+use crate::prices::PriceCache;
+use crate::prices::recompute::Recompute;
 use crate::rate_limit::SlidingWindow;
 use crate::usage::UsageWriter;
 
@@ -43,6 +45,13 @@ pub struct AppState {
     /// Wakes the refresh scheduler after changes to the plans.
     pub schedule_changed: Arc<Notify>,
     pub usage: UsageWriter,
+    /// The current prices; the usage writer computes the cost of each row with them.
+    pub prices: PriceCache,
+    /// Only one price sync runs at a time.
+    pub price_sync: Arc<tokio::sync::Mutex<()>>,
+    /// Wakes the price sync scheduler after a settings change.
+    pub price_schedule_changed: Arc<Notify>,
+    pub recompute: Arc<Recompute>,
     /// Running gateway requests, so that shutdown can wait for their usage rows.
     pub gateway_tasks: TaskTracker,
     /// Cancelled at shutdown: running gateway requests stop and record their usage.
@@ -60,6 +69,7 @@ pub struct LoginLimits {
 impl AppState {
     pub fn new(config: Config, db: SqlitePool) -> anyhow::Result<Self> {
         let webauthn = passkeys(&config);
+        let prices = PriceCache::default();
         Ok(Self {
             secrets: SecretBox::new(&config.master_key),
             webauthn: webauthn.map(Arc::new),
@@ -76,7 +86,11 @@ impl AppState {
             refresher: Arc::default(),
             link_flows: Arc::default(),
             schedule_changed: Arc::default(),
-            usage: UsageWriter::start(db.clone()),
+            usage: UsageWriter::start(db.clone(), prices.clone()),
+            prices,
+            price_sync: Arc::default(),
+            price_schedule_changed: Arc::default(),
+            recompute: Arc::default(),
             gateway_tasks: TaskTracker::new(),
             stopping: CancellationToken::new(),
             config: Arc::new(config),

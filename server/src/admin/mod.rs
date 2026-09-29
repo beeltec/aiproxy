@@ -10,6 +10,7 @@ mod factors;
 mod instance_settings;
 mod models;
 mod passkeys;
+mod pricing;
 mod session;
 mod subscriptions;
 
@@ -48,6 +49,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(connections::router())
         .merge(models::router())
         .merge(aliases::router())
+        .merge(pricing::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

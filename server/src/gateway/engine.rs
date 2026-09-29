@@ -17,7 +17,7 @@ use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Media, Row, Tokens};
+use crate::usage::{Extras, Media, Row, Step, Tokens};
 
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -124,6 +124,10 @@ pub(super) struct Outcome {
     pub final_response: Option<Value>,
     /// Usage in billing categories, when the upstream format is not OpenAI's.
     pub tokens: Option<Tokens>,
+    /// The usage facts besides the tokens, with `tokens`.
+    pub extras: Extras,
+    /// The sampling steps of `tokens` (Anthropic answers and their iterations).
+    pub steps: Vec<Step>,
     /// The service tier that a native Chat or Messages answer reported.
     pub service_tier: Option<String>,
     pub first_token_ms: Option<i64>,
@@ -612,6 +616,42 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
     };
     state.key_limits.settle_tokens(job.key.id, job.reserved_tokens, used);
 
+    // A Responses final answer has the facts in its usage.
+    let extras = match (&outcome.tokens, response) {
+        (None, Some(response)) => Extras::from_usage(&response["usage"]),
+        _ => outcome.extras.clone(),
+    };
+    // An answer with sampling steps (Anthropic answers, continuations and iterations) has one
+    // row per step, with the facts of the step; the first step is on the model row.
+    let mut steps = match &outcome.tokens {
+        Some(_) => outcome.steps.clone(),
+        None => Vec::new(),
+    };
+    if let Some(first) = steps.first_mut() {
+        first.tokens.inexact |= outcome.searches_uncounted;
+    }
+    // Each step keeps its own facts; the reported cost is for the whole request.
+    let service_tier_reported = outcome
+        .service_tier
+        .clone()
+        .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned));
+    let (row_tokens, row_status, row_extras, row_tier) = match steps.first() {
+        Some(first) => (
+            first.tokens.clone(),
+            if first.estimated { "estimated" } else { usage_status },
+            Extras {
+                reported_cost_nano: extras.reported_cost_nano,
+                ..first.extras.clone()
+            },
+            // A step keeps its own tier, also when it reported none.
+            first.service_tier.clone(),
+        ),
+        None => (tokens, usage_status, extras, service_tier_reported),
+    };
+    // Prices differ per search tool; a request has one of them.
+    let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let preview_search = tools.iter().any(|tool| tool["type"] == "web_search_preview")
+        && !tools.iter().any(|tool| tool["type"] == "web_search");
     let row = Row {
         request_id: random_token(12),
         component: "model",
@@ -633,19 +673,18 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         resolved_model: Some(job.route.qualified.clone()),
         effort: job.body["reasoning"]["effort"].as_str().map(str::to_owned),
         service_tier_requested: job.body["service_tier"].as_str().map(str::to_owned),
-        service_tier_reported: outcome
-            .service_tier
-            .clone()
-            .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
+        service_tier_reported: row_tier,
         streamed: job.stream,
         status_code,
         error_kind,
         latency_ms: started.elapsed().as_millis() as i64,
         first_token_ms: outcome.first_token_ms,
-        usage_status,
-        tokens,
-        web_search_calls: outcome.web_search_calls,
+        usage_status: row_status,
+        tokens: row_tokens,
+        web_search_calls: if preview_search { 0 } else { outcome.web_search_calls },
+        web_search_preview_calls: if preview_search { outcome.web_search_calls } else { 0 },
         failover_attempts: (outcome.attempts - 1).max(0),
+        extras: row_extras,
         media: Media {
             input_images: input_images(&job.body["input"]),
             ..Media::default()
@@ -662,14 +701,32 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         usage_status,
         tokens,
         web_search_calls: 0,
+        web_search_preview_calls: 0,
         failover_attempts: 0,
         media,
+        extras: Extras::default(),
         ..row.clone()
     });
-    state
-        .usage
-        .record_all(std::iter::once(row).chain(image_row).collect())
-        .await;
+    let step_rows: Vec<Row> = steps
+        .into_iter()
+        .skip(1)
+        .map(|step| Row {
+            component: "iteration",
+            first_token_ms: None,
+            usage_status: if step.estimated { "estimated" } else { usage_status },
+            service_tier_reported: step.service_tier,
+            tokens: step.tokens,
+            web_search_calls: 0,
+            web_search_preview_calls: 0,
+            media: Media::default(),
+            extras: step.extras,
+            ..row.clone()
+        })
+        .collect();
+    let mut rows = vec![row];
+    rows.extend(step_rows);
+    rows.extend(image_row);
+    state.usage.record_all(rows).await;
 }
 
 /// Images in the request input (content parts and tool outputs).

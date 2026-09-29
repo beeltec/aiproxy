@@ -155,8 +155,10 @@ pub async fn count_tokens(
             usage_status: "none",
             tokens: Tokens::default(),
             web_search_calls: 0,
+            web_search_preview_calls: 0,
             failover_attempts: 0,
             media: Default::default(),
+            extras: Default::default(),
         })
         .await;
     match result {

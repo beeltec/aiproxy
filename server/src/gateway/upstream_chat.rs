@@ -13,7 +13,7 @@ use super::routing::Route;
 use crate::connections::Kind;
 use crate::crypto::random_token;
 use crate::db::now;
-use crate::usage::Tokens;
+use crate::usage::{Extras, Tokens};
 
 /// OpenRouter reasoning details go to clients inside encrypted reasoning with this prefix.
 const OPENROUTER_PREFIX: &str = "aipo1:";
@@ -365,6 +365,7 @@ pub struct ChatDecoder {
     done_items: Vec<(usize, Value)>,
     finish_reason: Option<String>,
     usage: Option<Tokens>,
+    extras: Extras,
     service_tier: Option<String>,
 }
 
@@ -386,6 +387,7 @@ impl ChatDecoder {
             done_items: Vec::new(),
             finish_reason: None,
             usage: None,
+            extras: Extras::default(),
             service_tier: None,
         }
     }
@@ -665,6 +667,7 @@ impl Decoder for ChatDecoder {
         }
         if data["usage"].is_object() {
             self.usage = Some(tokens(&data["usage"]));
+            self.extras = Extras::from_usage(&data["usage"]);
         }
         if let Some(tier) = data["service_tier"].as_str() {
             self.service_tier = Some(tier.to_owned());
@@ -769,5 +772,9 @@ impl Decoder for ChatDecoder {
 
     fn tokens(&self) -> Option<Tokens> {
         self.usage.clone()
+    }
+
+    fn extras(&self) -> Extras {
+        self.extras.clone()
     }
 }

@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
+
+use crate::prices::{Cost, CostInput, PriceCache};
 use tokio::sync::{mpsc, oneshot};
 
 /// Token counts as billing categories that do not overlap.
@@ -92,6 +94,22 @@ impl Tokens {
         }
     }
 
+    pub fn add(&mut self, other: &Self) {
+        self.input_text += other.input_text;
+        self.input_text_cached += other.input_text_cached;
+        self.input_audio += other.input_audio;
+        self.input_audio_cached += other.input_audio_cached;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.input_image += other.input_image;
+        self.input_image_cached += other.input_image_cached;
+        self.output_text += other.output_text;
+        self.output_reasoning += other.output_reasoning;
+        self.output_audio += other.output_audio;
+        self.output_image += other.output_image;
+        self.inexact |= other.inexact;
+    }
+
     /// Splits the usage of an image model (Images API, image-generation tool). Without cache
     /// details the cached count is 0 when `cache_known` (the Images API has no cache price), else
     /// unknown, and then the split is not exact.
@@ -151,6 +169,118 @@ impl Tokens {
     }
 }
 
+/// One sampling step of an answer. Each step has its own usage row, so that the price of long
+/// requests applies per step.
+#[derive(Clone, Debug, Default)]
+pub struct Step {
+    pub tokens: Tokens,
+    /// The facts of the answer that the step belongs to (speed, geography).
+    pub extras: Extras,
+    /// The service tier that the answer of the step reported.
+    pub service_tier: Option<String>,
+    /// The final usage of the step is missing; its tokens are estimated.
+    pub estimated: bool,
+}
+
+/// The most steps (rows) of one answer.
+const MAX_STEPS: usize = 64;
+
+/// A short text field of a usage object; a long one is not a valid value.
+pub fn short_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 32)
+        .map(str::to_owned)
+}
+
+impl Step {
+    /// The steps of an Anthropic answer. With `iterations` (compaction), each step has its own
+    /// usage, and the top-level usage leaves some steps out. Without them, the answer is one
+    /// step.
+    pub fn anthropic(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
+        let extras = Extras::from_usage(usage);
+        let service_tier = short_text(&usage["service_tier"]);
+        let step = |tokens| Self {
+            tokens,
+            extras: extras.clone(),
+            service_tier: service_tier.clone(),
+            estimated: false,
+        };
+        let Some(iterations) = usage["iterations"].as_array().filter(|steps| !steps.is_empty()) else {
+            return vec![step(Tokens::from_anthropic(usage, ttl))];
+        };
+        // Iterations after the limit go into the last step, so the total stays the same; its
+        // long-context price can then be wrong, so it is not exact.
+        let mut steps: Vec<Self> = iterations
+            .iter()
+            .take(MAX_STEPS)
+            .map(|s| step(Tokens::from_anthropic(s, ttl)))
+            .collect();
+        if let Some(last) = steps.last_mut() {
+            for iteration in iterations.iter().skip(MAX_STEPS) {
+                last.tokens.add(&Tokens::from_anthropic(iteration, ttl));
+                last.tokens.inexact = true;
+            }
+        }
+        // The thinking tokens are reported only for the whole answer, which counts the
+        // `message` iterations. With more than one of them the split is a guess.
+        let mut thinking = usage["output_tokens_details"]["thinking_tokens"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(0);
+        let mut messages: Vec<usize> = iterations
+            .iter()
+            .enumerate()
+            .filter(|(_, iteration)| iteration["type"] == "message")
+            .map(|(index, _)| index.min(MAX_STEPS - 1))
+            .collect();
+        messages.dedup();
+        let guessed = messages.len() > 1 && thinking > 0;
+        for index in messages {
+            let tokens = &mut steps[index].tokens;
+            let moved = thinking.min(tokens.output_text);
+            tokens.output_text -= moved;
+            tokens.output_reasoning += moved;
+            tokens.inexact |= guessed;
+            thinking -= moved;
+        }
+        steps
+    }
+
+    pub fn total(steps: &[Self]) -> Tokens {
+        let mut total = Tokens::default();
+        steps.iter().for_each(|step| total.add(&step.tokens));
+        total
+    }
+}
+
+/// Usage facts besides the token categories.
+#[derive(Clone, Debug, Default)]
+pub struct Extras {
+    /// Anthropic `speed` (`fast` or `standard`).
+    pub speed: Option<String>,
+    /// Anthropic `inference_geo`.
+    pub inference_geo: Option<String>,
+    /// The cost that the provider reported (OpenRouter `cost`, in USD), in nano-USD.
+    pub reported_cost_nano: Option<i64>,
+    pub accepted_prediction_tokens: i64,
+    pub rejected_prediction_tokens: i64,
+}
+
+impl Extras {
+    /// Reads the facts of an OpenAI, OpenRouter or Anthropic usage object.
+    pub fn from_usage(usage: &Value) -> Self {
+        let details = &usage["completion_tokens_details"];
+        Self {
+            speed: short_text(&usage["speed"]),
+            inference_geo: short_text(&usage["inference_geo"]),
+            reported_cost_nano: usage["cost"].as_f64().map(|usd| (usd * 1e9).round() as i64),
+            accepted_prediction_tokens: details["accepted_prediction_tokens"].as_i64().unwrap_or(0).max(0),
+            rejected_prediction_tokens: details["rejected_prediction_tokens"].as_i64().unwrap_or(0).max(0),
+        }
+    }
+}
+
 /// Quantities of media requests and of the image-generation tool.
 #[derive(Clone, Debug, Default)]
 pub struct Media {
@@ -165,7 +295,8 @@ pub struct Media {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub request_id: String,
-    /// `model`, or `image_tool` for the second row of a request that used the image tool.
+    /// `model`; `iteration` for each further sampling step of an Anthropic answer; `image_tool`
+    /// for the image-generation tool.
     pub component: &'static str,
     pub time: i64,
     pub api_key_id: i64,
@@ -189,9 +320,12 @@ pub struct Row {
     /// `reported`, `estimated` or `none`.
     pub usage_status: &'static str,
     pub tokens: Tokens,
+    /// Calls of the `web_search` tool (also Anthropic web search).
     pub web_search_calls: i64,
+    pub web_search_preview_calls: i64,
     pub failover_attempts: i64,
     pub media: Media,
+    pub extras: Extras,
 }
 
 enum Job {
@@ -210,13 +344,13 @@ const QUEUE: usize = 1000;
 
 impl UsageWriter {
     /// Starts the writer task.
-    pub fn start(db: SqlitePool) -> Self {
+    pub fn start(db: SqlitePool, prices: PriceCache) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Job>(QUEUE);
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 match job {
                     Job::Rows(rows) => {
-                        if let Err(err) = insert_all(&db, &rows).await {
+                        if let Err(err) = insert_all(&db, &prices, &rows).await {
                             let request = rows.first().map(|row| row.request_id.as_str()).unwrap_or_default();
                             tracing::error!(error = %err, request, "cannot save the usage rows");
                         }
@@ -251,15 +385,44 @@ impl UsageWriter {
     }
 }
 
-async fn insert_all(db: &SqlitePool, rows: &[Row]) -> Result<(), sqlx::Error> {
+async fn insert_all(db: &SqlitePool, prices: &PriceCache, rows: &[Row]) -> Result<(), sqlx::Error> {
+    let book = prices.get();
     let mut tx = db.begin().await?;
     for row in rows {
-        insert(&mut tx, row).await?;
+        let cost = book.cost(&cost_input(row));
+        insert(&mut tx, row, &cost).await?;
     }
     tx.commit().await
 }
 
-async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error> {
+fn cost_input(row: &Row) -> CostInput {
+    let mut input = CostInput {
+        component: row.component.to_owned(),
+        upstream: row.upstream.to_owned(),
+        resolved_model: row.resolved_model.clone(),
+        usage_status: row.usage_status.to_owned(),
+        usage_exact: usage_exact(row),
+        service_tier_reported: row.service_tier_reported.clone(),
+        speed: row.extras.speed.clone(),
+        inference_geo: row.extras.inference_geo.clone(),
+        web_search_calls: row.web_search_calls,
+        web_search_preview_calls: row.web_search_preview_calls,
+        images_generated: row.media.images_generated,
+        image_size: row.media.image_size.clone(),
+        image_quality: row.media.image_quality.clone(),
+        characters: row.media.characters,
+        seconds: row.media.seconds,
+        ..CostInput::default()
+    };
+    input.set_tokens(&row.tokens);
+    input
+}
+
+fn usage_exact(row: &Row) -> bool {
+    row.usage_status == "reported" && !row.tokens.inexact
+}
+
+async fn insert(db: &mut SqliteConnection, row: &Row, cost: &Cost) -> Result<(), sqlx::Error> {
     let t = &row.tokens;
     // Rows of deleted keys, accounts or connections keep NULL, so the insert does not fail on
     // the foreign key.
@@ -270,10 +433,12 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
              usage_exact, input_text, input_text_cached, input_audio, input_audio_cached, cache_write_5m,
              cache_write_1h, input_image, input_image_cached, output_text, output_reasoning, output_audio,
              output_image, web_search_calls, failover_attempts, images_generated, image_size, image_quality,
-             input_images, characters, seconds)
+             input_images, characters, seconds, web_search_preview_calls, speed, inference_geo,
+             accepted_prediction_tokens, rejected_prediction_tokens, reported_cost_nano, cost_nano,
+             cost_complete, cost_parts, price_version_id)
          VALUES (?, ?, ?, (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, (SELECT id FROM chatgpt_accounts WHERE id = ?),
              (SELECT id FROM connections WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.request_id)
     .bind(row.component)
@@ -296,7 +461,7 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
     .bind(row.latency_ms)
     .bind(row.first_token_ms)
     .bind(row.usage_status)
-    .bind(row.usage_status == "reported" && !t.inexact)
+    .bind(usage_exact(row))
     .bind(t.input_text)
     .bind(t.input_text_cached)
     .bind(t.input_audio)
@@ -317,6 +482,16 @@ async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error>
     .bind(row.media.input_images)
     .bind(row.media.characters)
     .bind(row.media.seconds)
+    .bind(row.web_search_preview_calls)
+    .bind(&row.extras.speed)
+    .bind(&row.extras.inference_geo)
+    .bind(row.extras.accepted_prediction_tokens)
+    .bind(row.extras.rejected_prediction_tokens)
+    .bind(row.extras.reported_cost_nano)
+    .bind(cost.nano)
+    .bind(cost.complete)
+    .bind(cost.parts_json())
+    .bind(cost.version)
     .execute(db)
     .await?;
     Ok(())
