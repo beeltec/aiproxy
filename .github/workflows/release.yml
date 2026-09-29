@@ -23,8 +23,8 @@ jobs:
       platforms: linux/amd64,linux/arm64
       cache: true
       cache-mode: max
-      # Signing writes the image into the public Sigstore log; the repository is private.
-      sign: "false"
+      # Signs the image with Sigstore (keyless, through the GitHub OIDC token).
+      sign: "auto"
       meta-images: ghcr.io/${{ github.repository }}
       meta-tags: |
         type=ref,event=branch
