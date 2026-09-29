@@ -79,6 +79,9 @@ pub async fn create(
 
 /// Local estimate: the Anthropic count needs an Anthropic model. It uses no generation
 /// allowance, but it has a usage row with zero tokens.
+/// A forwarded token count runs outside the engine, so it has its own total limit.
+const COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub async fn count_tokens(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
@@ -100,28 +103,31 @@ pub async fn count_tokens(
         Err(failure) => return error(failure),
     };
     // Anthropic connections count themselves; other models get the local estimate.
-    let (input_tokens, upstream, connection_id) = match route.upstream {
+    let (result, upstream, connection_id) = match route.upstream {
         Upstream::Connection {
             id,
             kind: Kind::Anthropic,
         } => {
             let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
             let version = header("anthropic-version").filter(|v| request::is_api_version(v));
-            match provider::count_tokens(
+            let count = provider::count_tokens(
                 &state,
                 id,
                 &body,
                 &route.upstream_model,
                 header("anthropic-beta"),
                 version,
-            )
-            .await
-            {
-                Ok(count) => (count, "anthropic", Some(id)),
-                Err(failure) => return error(failure),
-            }
+            );
+            let result = tokio::time::timeout(COUNT_TIMEOUT, count).await.unwrap_or_else(|_| {
+                Err(Failure::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "The token count took too long.",
+                ))
+            });
+            (result, "anthropic", Some(id))
         }
-        _ => (crate::tokens::estimate(&converted).await as i64, "local", None),
+        _ => (Ok(crate::tokens::estimate(&converted).await as i64), "local", None),
     };
     state
         .usage
@@ -141,8 +147,8 @@ pub async fn count_tokens(
             service_tier_requested: None,
             service_tier_reported: None,
             streamed: false,
-            status_code: 200,
-            error_kind: None,
+            status_code: result.as_ref().map_or_else(|f| f.status.as_u16(), |_| 200),
+            error_kind: result.as_ref().err().map(|f| f.code.to_owned()),
             latency_ms: started.elapsed().as_millis() as i64,
             first_token_ms: None,
             usage_status: "none",
@@ -151,7 +157,10 @@ pub async fn count_tokens(
             failover_attempts: 0,
         })
         .await;
-    Json(json!({ "input_tokens": input_tokens })).into_response()
+    match result {
+        Ok(input_tokens) => Json(json!({ "input_tokens": input_tokens })).into_response(),
+        Err(failure) => error(failure),
+    }
 }
 
 pub fn error(failure: Failure) -> Response {
@@ -391,9 +400,7 @@ fn user_message(blocks: &[Value], input: &mut Vec<Value>) -> Result<(), String> 
                     .push(json!({ "type": "function_call_output", "call_id": block["tool_use_id"], "output": output }));
             }
             _ => {
-                if let Some(part) = content_part(block)? {
-                    parts.push(part);
-                }
+                parts.extend(content_part(block)?);
             }
         }
     }
@@ -424,7 +431,8 @@ fn tool_result_output(content: &Value) -> Result<Value, String> {
     Ok(Value::Array(parts))
 }
 
-fn content_part(block: &Value) -> Result<Option<Value>, String> {
+/// The Responses parts of one Anthropic block (none, one, or several for inline documents).
+fn content_part(block: &Value) -> Result<Vec<Value>, String> {
     let source = &block["source"];
     let data_url = || {
         format!(
@@ -433,7 +441,7 @@ fn content_part(block: &Value) -> Result<Option<Value>, String> {
             source["data"].as_str().unwrap_or_default()
         )
     };
-    Ok(match block["type"].as_str().unwrap_or_default() {
+    let part = match block["type"].as_str().unwrap_or_default() {
         "text" => Some(json!({ "type": "input_text", "text": block["text"] })),
         "image" => match source["type"].as_str() {
             Some("base64") => Some(json!({ "type": "input_image", "image_url": data_url() })),
@@ -447,26 +455,30 @@ fn content_part(block: &Value) -> Result<Option<Value>, String> {
                 "filename": block["title"].as_str().unwrap_or("document.pdf"),
             })),
             Some("text") => Some(json!({ "type": "input_text", "text": source["data"] })),
-            // Inline content: its text blocks (images in it are not supported).
-            Some("content") => {
-                let text = match &source["content"] {
-                    Value::String(text) => text.clone(),
-                    Value::Array(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    _ => String::new(),
-                };
-                Some(json!({ "type": "input_text", "text": text }))
-            }
+            // Inline content: its blocks go through the same checks (a stored file in an image
+            // is refused like everywhere else).
+            Some("content") => match &source["content"] {
+                Value::String(text) => Some(json!({ "type": "input_text", "text": text })),
+                Value::Array(blocks) => {
+                    let mut parts = Vec::new();
+                    for nested in blocks {
+                        if !matches!(nested["type"].as_str(), Some("text" | "image")) {
+                            return Err("Inline documents can hold only text and image blocks.".into());
+                        }
+                        parts.extend(content_part(nested)?);
+                    }
+                    return Ok(parts);
+                }
+                _ => None,
+            },
             Some("url") => Some(json!({ "type": "input_file", "file_url": source["url"] })),
             _ => return Err("This document source is not supported.".into()),
         },
         "search_result" => Some(json!({ "type": "input_text", "text": block.to_string() })),
         // Thinking in a user turn does not exist; other blocks carry no content for the model.
         _ => None,
-    })
+    };
+    Ok(part.into_iter().collect())
 }
 
 fn assistant_message(blocks: &[Value], input: &mut Vec<Value>) {

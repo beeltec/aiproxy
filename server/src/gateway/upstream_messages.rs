@@ -442,6 +442,9 @@ pub fn encode(
                     json!({ "type": "object" })
                 };
                 let mut function = json!({ "name": tool["name"], "input_schema": schema });
+                if tool["strict"] == true {
+                    function["strict"] = json!(true);
+                }
                 if let Some(description) = tool["description"].as_str() {
                     function["description"] = json!(description);
                 }
