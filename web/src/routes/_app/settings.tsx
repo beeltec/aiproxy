@@ -67,7 +67,7 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 			{save.error && <FieldError>{save.error.message}</FieldError>}
 			<Section
 				title="Time zone"
-				description="Refresh plans run in this time zone."
+				description="Refresh and price sync plans run in this time zone."
 			>
 				<Field>
 					<FieldLabel htmlFor="time-zone">Time zone</FieldLabel>
@@ -117,6 +117,42 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 					<p className="max-w-prose text-sm text-muted-foreground">
 						Tokens are also renewed when a request needs them, even with the
 						plan off.
+					</p>
+				</FieldGroup>
+			</Section>
+			<Section
+				title="Price sync"
+				description="The gateway loads the public price lists of LiteLLM, models.dev and OpenRouter on this plan. Costs of new requests use the new prices."
+			>
+				<FieldGroup>
+					<SwitchField
+						id="price-sync-enabled"
+						label="Load prices on a plan"
+						checked={value.price_sync.enabled}
+						onChange={(enabled) =>
+							setValue({
+								...value,
+								price_sync: { ...value.price_sync, enabled },
+							})
+						}
+					/>
+					<div className="max-w-md">
+						<CronField
+							id="price-sync-cron"
+							label="Plan (cron)"
+							value={value.price_sync.cron}
+							timeZone={value.time_zone}
+							disabled={!value.price_sync.enabled}
+							onChange={(cron) =>
+								setValue({
+									...value,
+									price_sync: { ...value.price_sync, cron },
+								})
+							}
+						/>
+					</div>
+					<p className="max-w-prose text-sm text-muted-foreground">
+						You can also load the lists now on the Pricing page.
 					</p>
 				</FieldGroup>
 			</Section>

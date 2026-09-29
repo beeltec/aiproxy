@@ -25,6 +25,14 @@
 	--meter-well: #1c1f27;
 	--danger: #c4372c;
 	--ok: #1f7a4d;
+	/* Chart groups: cool inks next to the cobalt signal; the last is "Other". */
+	--series-1: #2a47c9;
+	--series-2: #1b8a8f;
+	--series-3: #7a4dcc;
+	--series-4: #c0417a;
+	--series-5: #5d8a22;
+	--series-6: #9a6b2f;
+	--series-7: #8f95a3;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -41,6 +49,13 @@
 		--meter-well: #0b0d12;
 		--danger: #f0685c;
 		--ok: #4cc38a;
+		--series-1: #7e95ff;
+		--series-2: #45c4c9;
+		--series-3: #b394f5;
+		--series-4: #f07bae;
+		--series-5: #9ccc5c;
+		--series-6: #d9a45e;
+		--series-7: #5d6474;
 	}
 }
 
@@ -145,4 +160,38 @@
 			var(--line) 2.5px,
 			transparent 3px
 		);
+}
+
+/*
+ * Graph paper behind charts, like the chart of a strip recorder: fine lines every 8 px,
+ * a stronger line every 40 px.
+ */
+@utility graph-paper {
+	background-color: var(--panel);
+	background-image:
+		linear-gradient(
+			to right,
+			color-mix(in oklab, var(--line) 55%, transparent) 1px,
+			transparent 1px
+		),
+		linear-gradient(
+			to bottom,
+			color-mix(in oklab, var(--line) 55%, transparent) 1px,
+			transparent 1px
+		),
+		linear-gradient(
+			to right,
+			color-mix(in oklab, var(--line) 22%, transparent) 1px,
+			transparent 1px
+		),
+		linear-gradient(
+			to bottom,
+			color-mix(in oklab, var(--line) 22%, transparent) 1px,
+			transparent 1px
+		);
+	background-size:
+		40px 40px,
+		40px 40px,
+		8px 8px,
+		8px 8px;
 }

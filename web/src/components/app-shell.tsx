@@ -2,7 +2,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
 	BadgeCheckIcon,
+	ChartColumnIcon,
 	ChevronsUpDownIcon,
+	CircleDollarSignIcon,
 	GaugeIcon,
 	KeyRoundIcon,
 	LogOutIcon,
@@ -26,6 +28,8 @@ import { meQuery } from "#/lib/session";
 type NavItem = {
 	to:
 		| "/"
+		| "/usage"
+		| "/pricing"
 		| "/api-keys"
 		| "/connections"
 		| "/aliases"
@@ -40,7 +44,11 @@ type NavItem = {
 const NAV: { group: string; items: NavItem[] }[] = [
 	{
 		group: "Monitor",
-		items: [{ to: "/", label: "Overview", icon: GaugeIcon }],
+		items: [
+			{ to: "/", label: "Overview", icon: GaugeIcon },
+			{ to: "/usage", label: "Usage", icon: ChartColumnIcon },
+			{ to: "/pricing", label: "Pricing", icon: CircleDollarSignIcon },
+		],
 	},
 	{
 		group: "Gateway",

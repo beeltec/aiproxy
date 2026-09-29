@@ -12,8 +12,8 @@ use super::session::AdminSession;
 use crate::db::now;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::prices::Prices;
-use crate::prices::recompute::{self, Status};
-use crate::prices::sync::{self, Source};
+use crate::prices::recompute::{self, RecomputeStatus};
+use crate::prices::sync::{self, PriceSource};
 use crate::state::AppState;
 
 const MAX_KEY: usize = 200;
@@ -28,14 +28,14 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(recompute_status, start_recompute))
 }
 
-#[utoipa::path(get, path = "/pricing/sources", tag = "pricing", responses((status = OK, body = Vec<Source>)))]
-async fn list_sources(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<Source>>> {
+#[utoipa::path(get, path = "/pricing/sources", tag = "pricing", responses((status = OK, body = Vec<PriceSource>)))]
+async fn list_sources(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<PriceSource>>> {
     Ok(Json(sync::sources(&state.db).await?))
 }
 
 /// Loads all price lists now. Returns when the sync is done.
-#[utoipa::path(post, path = "/pricing/sync", tag = "pricing", responses((status = OK, body = Vec<Source>)))]
-async fn sync_now(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<Source>>> {
+#[utoipa::path(post, path = "/pricing/sync", tag = "pricing", responses((status = OK, body = Vec<PriceSource>)))]
+async fn sync_now(_: AdminSession, State(state): State<AppState>) -> ApiResult<Json<Vec<PriceSource>>> {
     sync::sync(&state).await?;
     Ok(Json(sync::sources(&state.db).await?))
 }
@@ -257,14 +257,14 @@ pub struct RecomputeRequest {
     models: Vec<String>,
 }
 
-#[utoipa::path(get, path = "/pricing/recompute", tag = "pricing", responses((status = OK, body = Status)))]
-async fn recompute_status(_: AdminSession, State(state): State<AppState>) -> Json<Status> {
+#[utoipa::path(get, path = "/pricing/recompute", tag = "pricing", responses((status = OK, body = RecomputeStatus)))]
+async fn recompute_status(_: AdminSession, State(state): State<AppState>) -> Json<RecomputeStatus> {
     Json(state.recompute.status())
 }
 
 /// Recalculates the cost of the rows in the time range with the current prices.
 #[utoipa::path(post, path = "/pricing/recompute", tag = "pricing", request_body = RecomputeRequest, responses(
-    (status = ACCEPTED, body = Status),
+    (status = ACCEPTED, body = RecomputeStatus),
     (status = BAD_REQUEST, body = ErrorBody),
     (status = CONFLICT, body = ErrorBody),
 ))]
@@ -272,7 +272,7 @@ async fn start_recompute(
     _: AdminSession,
     State(state): State<AppState>,
     Json(req): Json<RecomputeRequest>,
-) -> ApiResult<(StatusCode, Json<Status>)> {
+) -> ApiResult<(StatusCode, Json<RecomputeStatus>)> {
     if req.from >= req.to {
         return Err(ApiError::bad_request("The start must be before the end."));
     }

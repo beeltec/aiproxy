@@ -22,7 +22,7 @@ const MAX_SLEEP: Duration = Duration::from_secs(3600);
 
 /// The last sync of one price list.
 #[derive(Clone, Debug, Serialize, ToSchema, sqlx::FromRow)]
-pub struct Source {
+pub struct PriceSource {
     pub source: String,
     /// Unix seconds of the last attempt.
     pub fetched_at: Option<i64>,
@@ -33,7 +33,7 @@ pub struct Source {
     pub entries: i64,
 }
 
-pub async fn sources(db: &SqlitePool) -> Result<Vec<Source>, sqlx::Error> {
+pub async fn sources(db: &SqlitePool) -> Result<Vec<PriceSource>, sqlx::Error> {
     sqlx::query_as("SELECT source, fetched_at, status, error, entries FROM price_sources ORDER BY source")
         .fetch_all(db)
         .await

@@ -12,6 +12,7 @@ mod models;
 mod passkeys;
 mod pricing;
 mod session;
+mod stats;
 mod subscriptions;
 
 pub use passkeys::Ceremonies;
@@ -50,6 +51,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(models::router())
         .merge(aliases::router())
         .merge(pricing::router())
+        .merge(stats::router())
 }
 
 pub fn router(state: AppState) -> Router<AppState> {

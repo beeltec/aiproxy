@@ -703,6 +703,108 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/pricing/models": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		/** The prices that apply to each enabled model now. */
+		get: operations["model_prices"];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pricing/overrides": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_overrides"];
+		put?: never;
+		/** New costs use the override at once; stored rows change only with a recompute. */
+		post: operations["create_override"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pricing/overrides/{id}": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		/** Saves the prices as a new version. Rows with the old version keep it until a recompute. */
+		put: operations["update_override"];
+		post?: never;
+		/** The override stops applying; its versions stay for the rows that use them. */
+		delete: operations["delete_override"];
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pricing/recompute": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["recompute_status"];
+		put?: never;
+		/** Recalculates the cost of the rows in the time range with the current prices. */
+		post: operations["start_recompute"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pricing/sources": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get: operations["list_sources"];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/pricing/sync": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/** Loads all price lists now. Returns when the sync is done. */
+		post: operations["sync_now"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/settings": {
 		parameters: {
 			query?: never;
@@ -750,6 +852,26 @@ export interface paths {
 		put?: never;
 		/** Creates the first admin with the setup token and logs in. */
 		post: operations["setup"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	"/stats": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * StatsTotals, a series per group and bucket, and the cost per category. Buckets have local
+		 *     borders in the time zone of the request.
+		 */
+		post: operations["stats"];
 		delete?: never;
 		options?: never;
 		head?: never;
@@ -958,6 +1080,17 @@ export interface components {
 			/** @description The model prefix, for example `anthropic-main` in `anthropic-main/claude-opus-5-5`. */
 			slug: string;
 		};
+		/**
+		 * @description Prices for long requests: they apply when the input of one request is above `above` tokens.
+		 *     An empty field keeps the price below the limit.
+		 */
+		ContextTier: {
+			/** Format: int64 */
+			above: number;
+			flex?: components["schemas"]["TokenPrices"] | null;
+			priority?: components["schemas"]["TokenPrices"] | null;
+			standard: components["schemas"]["TokenPrices"];
+		};
 		CreateAdmin: {
 			password: string;
 			username: string;
@@ -1010,6 +1143,15 @@ export interface components {
 			/** @description All account ids in the new order. */
 			account_ids: number[];
 		};
+		/** @description The price of one generated image. */
+		ImagePrice: {
+			/** @description Empty: all qualities. */
+			quality?: string | null;
+			/** @description For example `1024x1024`. */
+			size: string;
+			/** Format: double */
+			usd: number;
+		};
 		/** @description Settings of a key. The same body is used to create and to change a key. */
 		KeySettings: {
 			/** @description Model patterns, for example `chatgpt/*` or `anthropic-main/claude-opus-5-5`. Empty: all models. */
@@ -1050,6 +1192,13 @@ export interface components {
 			passkey: boolean;
 			recovery_code: boolean;
 			totp: boolean;
+		};
+		ModelPrice: {
+			/** @description `chatgpt`, `openai`, `anthropic` or `openrouter`. */
+			kind: string;
+			/** @description `chatgpt/<model>` or `<connection slug>/<model>`. */
+			model: string;
+			price?: components["schemas"]["PriceView"] | null;
 		};
 		ModelUpdate: {
 			/** @description Capabilities to change. An empty object removes all changes. */
@@ -1094,6 +1243,25 @@ export interface components {
 			/** @description Options for `navigator.credentials` (`publicKey` member). */
 			options: unknown;
 		};
+		OverridePrices: {
+			prices: components["schemas"]["Prices"];
+		};
+		OverrideSettings: {
+			match_key: string;
+			prices: components["schemas"]["Prices"];
+		};
+		OverrideView: {
+			/** Format: int64 */
+			created_at: number;
+			created_by?: string | null;
+			/** Format: int64 */
+			id: number;
+			/** @description `connection/model`, `chatgpt/model` or a model key such as `openai/gpt-5`. */
+			match_key: string;
+			prices: components["schemas"]["Prices"];
+			/** Format: int64 */
+			version_id: number;
+		};
 		PasskeyView: {
 			/** Format: int64 */
 			created_at: number;
@@ -1111,10 +1279,120 @@ export interface components {
 			authorize_url: string;
 			flow: string;
 		};
+		/** @description The last sync of one price list. */
+		PriceSource: {
+			/**
+			 * Format: int64
+			 * @description Models with prices in the last good list.
+			 */
+			entries: number;
+			error?: string | null;
+			/**
+			 * Format: int64
+			 * @description Unix seconds of the last attempt.
+			 */
+			fetched_at?: number | null;
+			source: string;
+			/** @description `ok` or `error` */
+			status: string;
+		};
+		PriceView: {
+			/** @description The override match key or the model key in the list. */
+			key: string;
+			prices: components["schemas"]["Prices"];
+			/** @description `override`, `openrouter`, `litellm` or `models_dev`. */
+			source: string;
+			/** Format: int64 */
+			version: number;
+		};
+		/** @description All prices of one model from one source. */
+		Prices: {
+			context_tiers?: components["schemas"]["ContextTier"][];
+			fast?: components["schemas"]["TokenPrices"] | null;
+			/**
+			 * Format: double
+			 * @description Anthropic fast mode: the standard prices times this number.
+			 */
+			fast_multiplier?: number | null;
+			flex?: components["schemas"]["TokenPrices"] | null;
+			/** @description Anthropic inference geography (`us`) → multiplier for all token prices. */
+			geo?: {
+				[key: string]: number;
+			};
+			images?: components["schemas"]["ImagePrice"][];
+			/**
+			 * @description The source has a price rule that the gateway cannot apply (for example off-peak
+			 *     prices), so costs from it are not complete.
+			 */
+			partial?: boolean;
+			/**
+			 * Format: double
+			 * @description USD per input character (speech).
+			 */
+			per_character?: number | null;
+			/**
+			 * Format: double
+			 * @description USD per second of input audio (transcription).
+			 */
+			per_second?: number | null;
+			priority?: components["schemas"]["TokenPrices"] | null;
+			standard: components["schemas"]["TokenPrices"];
+			/**
+			 * @description The price changes per request (OpenRouter routers): the cost is unknown, and no other
+			 *     list is used for the model.
+			 */
+			variable?: boolean;
+			/**
+			 * Format: double
+			 * @description USD per call of the `web_search` tool (also Anthropic web search).
+			 */
+			web_search?: number | null;
+			/**
+			 * Format: double
+			 * @description USD per call of the `web_search_preview` tool.
+			 */
+			web_search_preview?: number | null;
+		};
+		RecomputeRequest: {
+			/**
+			 * Format: int64
+			 * @description Unix seconds, inclusive.
+			 */
+			from: number;
+			/** @description Resolved model names (`connection/model`); empty: all models. */
+			models?: string[];
+			/**
+			 * Format: int64
+			 * @description Unix seconds, exclusive.
+			 */
+			to: number;
+		};
+		RecomputeStatus: {
+			/**
+			 * Format: int64
+			 * @description Rows done and rows in the range.
+			 */
+			done: number;
+			error?: string | null;
+			/** Format: int64 */
+			finished_at?: number | null;
+			/**
+			 * Format: int64
+			 * @description Unix seconds of the time range.
+			 */
+			from?: number | null;
+			running: boolean;
+			/** Format: int64 */
+			started_at?: number | null;
+			/** Format: int64 */
+			to?: number | null;
+			/** Format: int64 */
+			total: number;
+		};
 		RecoveryCodes: {
 			recovery_codes: string[];
 		};
-		/** @description Scheduled token refresh of the ChatGPT accounts. */
+		/** @description A scheduled job (token refresh, price sync). */
 		RefreshSchedule: {
 			/** @description 5-field cron: minute hour day-of-month month day-of-week. */
 			cron: string;
@@ -1144,6 +1422,11 @@ export interface components {
 		};
 		Settings: {
 			failover: components["schemas"]["Failover"];
+			/**
+			 * @description The price sync from the public price lists.
+			 *     Settings saved before the price sync existed have none.
+			 */
+			price_sync: components["schemas"]["RefreshSchedule"];
 			refresh: components["schemas"]["RefreshSchedule"];
 			/** @description IANA time zone, for example `Europe/Berlin`. Cron plans use it. */
 			time_zone: string;
@@ -1157,9 +1440,132 @@ export interface components {
 			/** @description True when no admin exists yet. */
 			required: boolean;
 		};
+		StatsGroup: {
+			/** @description The group value: API key id, model name, `chatgpt:<id>`, `connection:<id>` or `all`. */
+			key: string;
+			label: string;
+			/** @description One point per bucket. */
+			series: components["schemas"]["StatsPoint"][];
+			totals: components["schemas"]["StatsTotals"];
+		};
+		/** @description One bucket of a group. */
+		StatsPoint: {
+			/** Format: int64 */
+			cost_nano: number;
+			/** Format: int64 */
+			input_tokens: number;
+			/** Format: int64 */
+			output_tokens: number;
+			/** Format: int64 */
+			requests: number;
+		};
+		StatsRequest: {
+			/** @description `hour`, `day`, `week` or `month`; empty: chosen by the length of the range. */
+			bucket?: string | null;
+			/**
+			 * Format: int64
+			 * @description Unix seconds, inclusive.
+			 */
+			from: number;
+			/** @description `key`, `model`, `upstream` or `none`. */
+			group: string;
+			/** @description API key ids; empty: all keys. */
+			keys?: number[];
+			/** @description Resolved model names; empty: all models. */
+			models?: string[];
+			/** @description IANA time zone of the buckets, for example `Europe/Berlin`. */
+			time_zone: string;
+			/**
+			 * Format: int64
+			 * @description Unix seconds, exclusive.
+			 */
+			to: number;
+			/** @description Upstream group keys (`chatgpt:<account id>`, `connection:<id>`); empty: all. */
+			upstreams?: string[];
+		};
+		StatsResponse: {
+			bucket: string;
+			/** @description Bucket starts, unix seconds. The first bucket starts at `from`, the last ends at `to`. */
+			buckets: number[];
+			/** @description Groups by calculated cost, highest first. */
+			groups: components["schemas"]["StatsGroup"][];
+			/** @description Requests that the gateway refused before routing (keys, limits), per reason. */
+			rejected: {
+				[key: string]: number;
+			};
+			totals: components["schemas"]["StatsTotals"];
+		};
+		/** @description Sums of usage rows. Requests count distinct request ids. */
+		StatsTotals: {
+			/** @description Per category (the usage column names): tokens, calls, images, characters, seconds. */
+			amounts: {
+				[key: string]: number;
+			};
+			/**
+			 * Format: int64
+			 * @description Calculated cost, nano-USD. Rows without a price are not in it.
+			 */
+			cost_nano: number;
+			/** @description Calculated cost ("API value") per category, nano-USD. */
+			costs: {
+				[key: string]: number;
+			};
+			/**
+			 * Format: int64
+			 * @description Requests with an error status.
+			 */
+			errors: number;
+			/**
+			 * Format: int64
+			 * @description Rows whose cost is not complete (estimated usage or missing prices).
+			 */
+			incomplete: number;
+			/**
+			 * Format: int64
+			 * @description The cost that providers reported (OpenRouter), nano-USD.
+			 */
+			reported_cost_nano: number;
+			/** Format: int64 */
+			requests: number;
+			/**
+			 * Format: int64
+			 * @description Rows with usage but no price.
+			 */
+			unpriced: number;
+		};
 		Thinking: {
 			adaptive: boolean;
 			enabled: boolean;
+		};
+		/** @description USD per token. An empty field has no price. */
+		TokenPrices: {
+			/** Format: double */
+			cache_write_1h?: number | null;
+			/** Format: double */
+			cache_write_5m?: number | null;
+			/** Format: double */
+			input_audio?: number | null;
+			/** Format: double */
+			input_audio_cached?: number | null;
+			/** Format: double */
+			input_image?: number | null;
+			/** Format: double */
+			input_image_cached?: number | null;
+			/** Format: double */
+			input_text?: number | null;
+			/** Format: double */
+			input_text_cached?: number | null;
+			/** Format: double */
+			output_audio?: number | null;
+			/** Format: double */
+			output_image?: number | null;
+			/**
+			 * Format: double
+			 * @description Empty: the output text price.
+			 */
+			output_reasoning?: number | null;
+			/** Format: double */
+			output_text?: number | null;
 		};
 		TotpSetup: {
 			otpauth_url: string;
@@ -2699,6 +3105,247 @@ export interface operations {
 			};
 		};
 	};
+	model_prices: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ModelPrice"][];
+				};
+			};
+		};
+	};
+	list_overrides: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["OverrideView"][];
+				};
+			};
+		};
+	};
+	create_override: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["OverrideSettings"];
+			};
+		};
+		responses: {
+			201: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["OverrideView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	update_override: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["OverridePrices"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["OverrideView"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	delete_override: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			204: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content?: never;
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	recompute_status: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["RecomputeStatus"];
+				};
+			};
+		};
+	};
+	start_recompute: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["RecomputeRequest"];
+			};
+		};
+		responses: {
+			202: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["RecomputeStatus"];
+				};
+			};
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	list_sources: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PriceSource"][];
+				};
+			};
+		};
+	};
+	sync_now: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["PriceSource"][];
+				};
+			};
+		};
+	};
 	get_settings: {
 		parameters: {
 			query?: never;
@@ -2822,6 +3469,37 @@ export interface operations {
 			};
 			/** @description Setup is closed or the token is wrong */
 			403: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	stats: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				"application/json": components["schemas"]["StatsRequest"];
+			};
+		};
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["StatsResponse"];
+				};
+			};
+			400: {
 				headers: {
 					[name: string]: unknown;
 				};
