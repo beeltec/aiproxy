@@ -31,7 +31,7 @@ export function MeterRegister({
 		<div
 			role="img"
 			aria-label={`${label}: ${formatUsd(nano)}`}
-			className="inline-flex items-stretch gap-[0.12em] rounded-[0.35em] bg-meter-well p-[0.14em] font-mono text-[2.25rem] leading-none shadow-[inset_0_2px_6px_rgb(0_0_0/0.6)] sm:text-5xl"
+			className="inline-flex items-stretch gap-[0.12em] rounded-[0.35em] bg-meter-well p-[0.14em] font-mono text-[clamp(1.4rem,8vw,2.25rem)] leading-none shadow-[inset_0_2px_6px_rgb(0_0_0/0.6)] sm:text-5xl"
 		>
 			<span className="flex w-[0.7em] items-center justify-center text-[0.55em] text-white/45">
 				$

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use axum::Json;
 use axum::extract::State;
-use chrono::{Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+use chrono::{Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
@@ -104,13 +104,23 @@ pub struct StatsResponse {
     groups: Vec<StatsGroup>,
 }
 
-/// The unix time of a local time. A local time in a clock change gap moves to the next hour.
+/// The unix time of a local time. A local time in a clock change gap becomes the moment of
+/// the change: the local time with the offset before the gap.
 fn local(tz: Tz, time: NaiveDateTime) -> i64 {
     match tz.from_local_datetime(&time) {
         LocalResult::Single(t) | LocalResult::Ambiguous(t, _) => t.timestamp(),
-        LocalResult::None => local(tz, time + Duration::hours(1)),
+        LocalResult::None => {
+            let before = tz
+                .from_local_datetime(&(time - Duration::hours(MAX_CHANGE_HOURS)))
+                .earliest()
+                .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()));
+            time.and_utc().timestamp() - before
+        }
     }
 }
+
+/// Clock changes are shorter than this.
+const MAX_CHANGE_HOURS: i64 = 26;
 
 /// The bucket starts in `[from, to)`, with local borders in `tz`. The first bucket starts at
 /// `from`.
@@ -130,20 +140,19 @@ fn buckets(from: i64, to: i64, tz: Tz, size: &str) -> Vec<i64> {
         fits
     };
     // An hour bucket starts at each local full hour. A repeated hour at a clock change gives
-    // two buckets; an hour in a gap has none. The local hours start a few hours early, so a
-    // range that starts in a repeated hour has all its borders; the borders are then sorted
-    // in real time.
+    // two buckets; an hour in a gap has none. The local hours start a day early, so a range
+    // that starts in a repeated hour has all its borders; the borders are then sorted in real
+    // time.
     if size == "hour" {
-        let mut hour = date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start) - Duration::hours(3);
+        let mut hour = date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start) - Duration::hours(MAX_CHANGE_HOURS);
         let mut borders = Vec::new();
-        for _ in 0..MAX_BUCKETS * 2 {
+        for _ in 0..MAX_BUCKETS * 2 + 2 * MAX_CHANGE_HOURS as usize {
             match tz.from_local_datetime(&hour) {
                 LocalResult::Single(t) => borders.push(t.timestamp()),
                 LocalResult::Ambiguous(first, second) => borders.extend([first.timestamp(), second.timestamp()]),
                 LocalResult::None => {}
             }
-            // Clock changes are at most a few hours.
-            if borders.last().is_some_and(|at| *at >= to + 4 * 3600) {
+            if borders.last().is_some_and(|at| *at >= to + MAX_CHANGE_HOURS * 3600) {
                 break;
             }
             hour += Duration::hours(1);

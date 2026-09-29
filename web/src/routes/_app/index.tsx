@@ -145,7 +145,7 @@ function Reading({
 			`${formatCount(totals.incomplete)} ${totals.incomplete === 1 ? "cost is" : "costs are"} estimated or incomplete`,
 	].filter(Boolean);
 	return (
-		<section className="plate grid gap-6 p-7 sm:p-8 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-center lg:gap-12">
+		<section className="plate grid gap-6 p-5 sm:p-8 xl:grid-cols-[auto_minmax(0,1fr)] xl:items-center xl:gap-12">
 			<div className="space-y-3">
 				<p className="eyebrow">API value · {range}</p>
 				<MeterRegister nano={totals.cost_nano} label="API value" />
@@ -225,7 +225,7 @@ function TopList({
 }) {
 	const top = (groups ?? []).slice(0, 6);
 	return (
-		<section className="rounded-xl border bg-card">
+		<section className="min-w-0 rounded-xl border bg-card">
 			<div className="flex items-center justify-between border-b px-5 py-3">
 				<h2 className="font-semibold">{title}</h2>
 				<Link
@@ -270,7 +270,7 @@ function Accounts() {
 	const { data: settings } = useQuery(settingsQuery);
 	const failover = settings?.failover.enabled ?? false;
 	return (
-		<section className="rounded-xl border bg-card">
+		<section className="min-w-0 rounded-xl border bg-card">
 			<div className="flex items-center justify-between border-b px-5 py-3">
 				<h2 className="font-semibold">Subscription limits</h2>
 				<Link
@@ -353,7 +353,7 @@ function Attention() {
 			: []),
 	];
 	return (
-		<section className="rounded-xl border bg-card">
+		<section className="min-w-0 rounded-xl border bg-card">
 			<h2 className="border-b px-5 py-3 font-semibold">Needs attention</h2>
 			{items.length === 0 ? (
 				<p className="px-5 py-4 text-sm text-muted-foreground">

@@ -29,6 +29,7 @@ import {
 } from "#/components/ui/dialog";
 import {
 	DropdownMenu,
+	DropdownMenuCheckboxItem,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
@@ -61,7 +62,7 @@ import {
 	recomputeQuery,
 	SOURCE_NAMES,
 } from "#/lib/pricing";
-import { formatCount, localDate } from "#/lib/stats";
+import { formatCount, localDate, rangeBounds } from "#/lib/stats";
 import { cn } from "#/lib/utils";
 
 export const Route = createFileRoute("/_app/pricing")({
@@ -95,7 +96,14 @@ function PricingPage() {
 		onSuccess: (sources) => {
 			queryClient.setQueryData(priceSourcesQuery.queryKey, sources);
 			void queryClient.invalidateQueries({ queryKey: ["pricing"] });
-			toast.success("The price lists are loaded.");
+			const failed = sources
+				.filter((s) => s.status === "error")
+				.map((s) => SOURCE_NAMES[s.source] ?? s.source);
+			if (failed.length === 0) toast.success("The price lists are loaded.");
+			else
+				toast.error(
+					`${failed.join(" and ")} did not load. The other lists are loaded; the failed ones keep their last prices.`,
+				);
 		},
 		onError: (error) => toast.error(errorMessage(error)),
 	});
@@ -698,16 +706,17 @@ function Recompute() {
 		localDate(new Date((today - 29 * 86_400) * 1000)),
 	);
 	const [to, setTo] = useState(localDate(new Date(today * 1000)));
+	// Empty: all models.
+	const [models, setModels] = useState<string[]>([]);
+	const { data: enabled = [] } = useQuery(modelPricesQuery);
 	const start = useMutation({
 		mutationFn: () => {
-			// Local midnights; the end date is included.
-			const begin = new Date(`${from}T00:00`).getTime() / 1000;
-			// The next local midnight, also on a day with a clock change.
-			const next = new Date(`${to}T00:00`);
-			next.setDate(next.getDate() + 1);
-			const end = next.getTime() / 1000;
+			// From the first local midnight to the one after the last day.
+			const [begin, end] = rangeBounds({ range: "custom", from, to });
 			return call(
-				api.POST("/pricing/recompute", { body: { from: begin, to: end } }),
+				api.POST("/pricing/recompute", {
+					body: { from: begin, to: end, models },
+				}),
 			);
 		},
 		onSuccess: (next) => {
@@ -754,6 +763,45 @@ function Recompute() {
 						/>
 					</Field>
 				</div>
+				<Field>
+					<FieldLabel>Models</FieldLabel>
+					<DropdownMenu>
+						<DropdownMenuTrigger
+							render={
+								<Button variant="outline" className="w-fit self-start">
+									{models.length === 0
+										? "All models"
+										: models.length === 1
+											? models[0]
+											: `${models.length} models`}
+								</Button>
+							}
+						/>
+						<DropdownMenuContent
+							align="start"
+							className="max-h-80 w-80 overflow-y-auto"
+						>
+							{enabled.map((m) => (
+								<DropdownMenuCheckboxItem
+									key={m.model}
+									checked={models.includes(m.model)}
+									onCheckedChange={(checked) =>
+										setModels(
+											checked
+												? [...models, m.model]
+												: models.filter((name) => name !== m.model),
+										)
+									}
+								>
+									<span className="truncate font-mono text-xs">{m.model}</span>
+								</DropdownMenuCheckboxItem>
+							))}
+						</DropdownMenuContent>
+					</DropdownMenu>
+					<FieldDescription>
+						Without a choice, all requests in the range get new costs.
+					</FieldDescription>
+				</Field>
 				<Button
 					type="submit"
 					disabled={start.isPending || status?.running || !from || !to}
