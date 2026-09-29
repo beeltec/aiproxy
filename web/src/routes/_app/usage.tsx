@@ -149,7 +149,8 @@ function UsageTable({
 	grouped: boolean;
 }) {
 	const columns = CATEGORIES.filter((c) => (totals.amounts[c.key] ?? 0) > 0);
-	if (totals.requests === 0) {
+	// Image tool rows can have usage without requests of their own.
+	if (groups.length === 0) {
 		return (
 			<p className="rounded-xl border border-dashed px-6 py-10 text-center text-sm text-muted-foreground">
 				No requests in this range. Choose a longer range or other filters.

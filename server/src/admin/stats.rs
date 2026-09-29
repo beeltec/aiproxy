@@ -8,7 +8,7 @@ use chrono::{Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -132,22 +132,22 @@ fn buckets(from: i64, to: i64, tz: Tz, size: &str) -> Vec<i64> {
     // An hour bucket starts at each local full hour. The candidates step a quarter hour in
     // real time, so a repeated hour at a clock change is its own bucket, and a clock change of
     // 30 minutes keeps the local borders.
-    // The first candidate can already be a later full hour (after a clock change gap). Some
-    // historic offsets have no full hours in UTC steps; the candidates have a limit.
+    // An hour bucket starts at each local full hour. A repeated hour at a clock change gives
+    // two buckets; an hour in a clock change gap has none.
     if size == "hour" {
-        let mut at = local(tz, date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start));
-        for _ in 0..MAX_BUCKETS * 8 {
-            let full_hour = tz
-                .timestamp_opt(at, 0)
-                .single()
-                .is_some_and(|t| t.minute() == 0 && t.second() == 0);
-            if at > from && full_hour && !push(at) {
-                break;
+        let mut hour = date.and_hms_opt(start.hour(), 0, 0).unwrap_or(start);
+        for _ in 0..MAX_BUCKETS * 2 {
+            let times = match tz.from_local_datetime(&hour) {
+                LocalResult::Single(t) => vec![t.timestamp()],
+                LocalResult::Ambiguous(first, second) => vec![first.timestamp(), second.timestamp()],
+                LocalResult::None => Vec::new(),
+            };
+            for at in times.into_iter().filter(|at| *at > from) {
+                if !push(at) {
+                    return out;
+                }
             }
-            if at >= to {
-                break;
-            }
-            at += 900;
+            hour += Duration::hours(1);
         }
         return out;
     }
@@ -264,12 +264,16 @@ fn push_filters(query: &mut QueryBuilder<Sqlite>, req: &StatsRequest) {
     list(query, group_expression("upstream"), req.upstreams.clone());
 }
 
-async fn labels(state: &AppState, group: &str, keys: &[String]) -> Result<HashMap<String, String>, sqlx::Error> {
+async fn labels(
+    db: &mut SqliteConnection,
+    group: &str,
+    keys: &[String],
+) -> Result<HashMap<String, String>, sqlx::Error> {
     let mut out = HashMap::new();
     match group {
         "key" => {
             let names: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM api_keys")
-                .fetch_all(&state.db)
+                .fetch_all(&mut *db)
                 .await?;
             out.extend(names.into_iter().map(|(id, name)| (id.to_string(), name)));
             out.insert("deleted".into(), "Deleted key".into());
@@ -277,14 +281,14 @@ async fn labels(state: &AppState, group: &str, keys: &[String]) -> Result<HashMa
         "upstream" => {
             let accounts: Vec<(i64, Option<String>, Option<String>)> =
                 sqlx::query_as("SELECT id, label, email FROM chatgpt_accounts")
-                    .fetch_all(&state.db)
+                    .fetch_all(&mut *db)
                     .await?;
             for (id, label, email) in accounts {
                 let name = label.or(email).unwrap_or_else(|| format!("Account {id}"));
                 out.insert(format!("chatgpt:{id}"), format!("ChatGPT · {name}"));
             }
             let connections: Vec<(i64, String)> = sqlx::query_as("SELECT id, display_name FROM connections")
-                .fetch_all(&state.db)
+                .fetch_all(&mut *db)
                 .await?;
             out.extend(
                 connections
@@ -420,7 +424,7 @@ async fn stats(
     }
 
     let keys: Vec<String> = groups.iter().map(|(key, _)| key.clone()).collect();
-    let labels = labels(&state, &req.group, &keys).await?;
+    let labels = labels(&mut tx, &req.group, &keys).await?;
     let mut groups: Vec<StatsGroup> = groups
         .into_iter()
         .map(|(key, totals)| StatsGroup {
