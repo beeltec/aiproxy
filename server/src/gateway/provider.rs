@@ -158,7 +158,10 @@ pub(super) async fn attempt(
         && (job.body["tools"]
             .as_array()
             .is_some_and(|tools| tools.iter().any(|t| t["type"] == "web_search"))
-            || job.route.upstream_model.contains("search"));
+            || job.route.upstream_model.contains("search")
+            || job.native["plugins"]
+                .as_array()
+                .is_some_and(|plugins| plugins.iter().any(|p| p["id"] == "web")));
     let native = wire.format() == job.client_format;
     // Translated requests always stream, so one decoder serves both client modes.
     let stream = !native || job.stream;
@@ -658,6 +661,10 @@ fn native_body(job: &Job, wire: Wire, kind: Kind) -> Result<(Value, Vec<String>)
             }
             if job.stream {
                 body["stream_options"]["include_usage"] = json!(true);
+            }
+            // OpenRouter searches only with its `web` plugin (or a model's own search).
+            if kind == Kind::OpenRouter && body["web_search_options"].is_object() && body["plugins"].is_null() {
+                body["plugins"] = json!([{ "id": "web" }]);
             }
         }
         Wire::Messages => {

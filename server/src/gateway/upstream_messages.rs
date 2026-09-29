@@ -20,6 +20,8 @@ const THINKING_PREFIX: &str = "aipa1:";
 const FAST_BETA: &str = "fast-mode-2026-02-01";
 const DEFAULT_MAX_TOKENS: i64 = 32_000;
 const MIN_BUDGET: i64 = 1_024;
+/// Upper bound for the kept assistant content put back into one request.
+const MAX_RESTORED_BYTES: usize = 16 * 1024 * 1024;
 const EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 fn b64() -> base64::engine::GeneralPurpose {
@@ -493,18 +495,28 @@ pub fn encode(
         }
     }
 
-    // Anthropic needs the thinking blocks only in the last assistant turn, so only that turn
-    // gets its kept content back (this also bounds the request size).
-    if let Some(message) = messages.iter_mut().rev().find(|m| m["role"] == "assistant") {
+    // Every assistant turn gets its kept content back: newer models check that the history
+    // before a signed block is unchanged. Each kept entry is used once, and the total is
+    // bounded, so a client cannot grow the request by repeating tool call ids.
+    let mut used: Vec<*const Vec<Value>> = Vec::new();
+    let mut restored_bytes = 0usize;
+    for message in messages.iter_mut().filter(|m| m["role"] == "assistant") {
         let kept = message["content"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|b| b["type"] == "tool_use")
             .find_map(|b| b["id"].as_str().and_then(restore));
-        if let Some(content) = kept {
-            message["content"] = Value::Array(content.as_ref().clone());
+        let Some(content) = kept else { continue };
+        if used.contains(&Arc::as_ptr(&content)) {
+            continue;
         }
+        restored_bytes += serde_json::to_vec(content.as_ref()).map_or(0, |bytes| bytes.len());
+        if restored_bytes > MAX_RESTORED_BYTES {
+            return Err("The conversation is too long to restore its thinking. Start the tool loop again.".into());
+        }
+        used.push(Arc::as_ptr(&content));
+        message["content"] = Value::Array(content.as_ref().clone());
     }
 
     let mut out = Map::new();
@@ -1033,7 +1045,7 @@ impl MessagesDecoder {
         self.output.sort_by_key(|(index, _)| *index);
         let output: Vec<Value> = self.output.drain(..).map(|(_, item)| item).collect();
         let incomplete = match self.stop_reason.as_deref() {
-            Some("max_tokens" | "pause_turn") => Some("max_output_tokens"),
+            Some("max_tokens" | "pause_turn" | "model_context_window_exceeded") => Some("max_output_tokens"),
             Some("refusal") => Some("content_filter"),
             _ => None,
         };
