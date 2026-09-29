@@ -159,13 +159,14 @@ impl Prices {
                 tier.output_reasoning = tier.output_text;
             }
         };
+        // A service tier without base prices uses the standard prices below the limit.
         for tier in &mut self.context_tiers {
             tied(&self.standard, &mut tier.standard);
-            if let (Some(base), Some(tier)) = (&self.priority, &mut tier.priority) {
-                tied(base, tier);
+            if let Some(tier) = &mut tier.priority {
+                tied(self.priority.as_ref().unwrap_or(&self.standard), tier);
             }
-            if let (Some(base), Some(tier)) = (&self.flex, &mut tier.flex) {
-                tied(base, tier);
+            if let Some(tier) = &mut tier.flex {
+                tied(self.flex.as_ref().unwrap_or(&self.standard), tier);
             }
         }
     }

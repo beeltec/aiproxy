@@ -209,7 +209,8 @@ impl Step {
         let Some(iterations) = usage["iterations"].as_array().filter(|steps| !steps.is_empty()) else {
             return vec![step(Tokens::from_anthropic(usage, ttl))];
         };
-        // Iterations after the limit go into the last step, so the total stays the same.
+        // Iterations after the limit go into the last step, so the total stays the same; its
+        // long-context price can then be wrong, so it is not exact.
         let mut steps: Vec<Self> = iterations
             .iter()
             .take(MAX_STEPS)
@@ -218,7 +219,29 @@ impl Step {
         if let Some(last) = steps.last_mut() {
             for iteration in iterations.iter().skip(MAX_STEPS) {
                 last.tokens.add(&Tokens::from_anthropic(iteration, ttl));
+                last.tokens.inexact = true;
             }
+        }
+        // The thinking tokens are reported only for the whole answer, which counts the
+        // `message` iterations. With more than one of them the split is a guess.
+        let mut thinking = usage["output_tokens_details"]["thinking_tokens"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(0);
+        let messages: Vec<usize> = iterations
+            .iter()
+            .take(MAX_STEPS)
+            .enumerate()
+            .filter(|(_, iteration)| iteration["type"] == "message")
+            .map(|(index, _)| index)
+            .collect();
+        for index in &messages {
+            let tokens = &mut steps[*index].tokens;
+            let moved = thinking.min(tokens.output_text);
+            tokens.output_text -= moved;
+            tokens.output_reasoning += moved;
+            tokens.inexact |= messages.len() > 1 && moved > 0;
+            thinking -= moved;
         }
         steps
     }
