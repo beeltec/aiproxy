@@ -4,8 +4,8 @@
 #   echo "AIPROXY_HOST=ai.example.com" > .env && echo "ACME_EMAIL=you@example.com" >> .env
 #   docker compose up -d
 #   docker compose exec aiproxy aiproxy setup-token
-# With a Traefik that already runs, remove the traefik service and attach that Traefik to the
-# proxy network with the fixed address below.
+# With a Traefik that already runs, remove the traefik service and the depends_on of aiproxy,
+# and attach that Traefik to the proxy network with the fixed address below.
 
 name: aiproxy
 

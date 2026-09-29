@@ -22,7 +22,7 @@ docker compose up -d
 
 The DNS name must point to the server, and ports 80 and 443 must be open. The image is private: log in first with `docker login ghcr.io` and a GitHub token with the `read:packages` scope.
 
-Traefik and aiproxy share a network where Traefik has a fixed address. `AIPROXY_TRUSTED_PROXIES` names that address, so only Traefik can set the client address (`X-Forwarded-For`). If Traefik already runs on the server, remove the `traefik` service and attach your Traefik to the `aiproxy_proxy` network with the address `172.30.0.2`.
+Traefik and aiproxy share a network where Traefik has a fixed address. `AIPROXY_TRUSTED_PROXIES` names that address, so only Traefik can set the client address (`X-Forwarded-For`). If Traefik already runs on the server, remove the `traefik` service and the `depends_on` of `aiproxy`, and attach your Traefik to the `aiproxy_proxy` network with the address `172.30.0.2`.
 
 Keep `master.key` and the `data` volume. The key encrypts the secrets in the database (provider keys, ChatGPT tokens, authenticator keys). Without it, those secrets cannot be read and must be added again.
 
