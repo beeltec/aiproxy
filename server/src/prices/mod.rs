@@ -153,20 +153,26 @@ impl Prices {
     /// reasoning price too, when the base prices reasoning like output: with no reasoning price
     /// or the same one (OpenRouter and LiteLLM list reasoning only in the base prices).
     fn tie_reasoning(&mut self) {
-        let tied = |base: &TokenPrices, tier: &mut TokenPrices| {
-            let like_output = base.output_reasoning.is_none() || base.output_reasoning == base.output_text;
+        // The base prices of a service tier, per field with the standard prices for missing
+        // fields.
+        let base = |tier: Option<&TokenPrices>| {
+            let reasoning = tier.and_then(|t| t.output_reasoning).or(self.standard.output_reasoning);
+            let output = tier.and_then(|t| t.output_text).or(self.standard.output_text);
+            reasoning.is_none() || reasoning == output
+        };
+        let tied = |like_output: bool, tier: &mut TokenPrices| {
             if like_output && tier.output_reasoning.is_none() && tier.output_text.is_some() {
                 tier.output_reasoning = tier.output_text;
             }
         };
-        // A service tier without base prices uses the standard prices below the limit.
+        let (standard, priority, flex) = (base(None), base(self.priority.as_ref()), base(self.flex.as_ref()));
         for tier in &mut self.context_tiers {
-            tied(&self.standard, &mut tier.standard);
+            tied(standard, &mut tier.standard);
             if let Some(tier) = &mut tier.priority {
-                tied(self.priority.as_ref().unwrap_or(&self.standard), tier);
+                tied(priority, tier);
             }
             if let Some(tier) = &mut tier.flex {
-                tied(self.flex.as_ref().unwrap_or(&self.standard), tier);
+                tied(flex, tier);
             }
         }
     }
