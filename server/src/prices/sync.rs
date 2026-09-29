@@ -39,6 +39,11 @@ pub async fn sources(db: &SqlitePool) -> Result<Vec<Source>, sqlx::Error> {
         .await
 }
 
+/// An owned copy of a download error that is still in use.
+fn copy(err: &anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("{err:#}")
+}
+
 async fn fetch(http: &reqwest::Client, url: &str) -> anyhow::Result<Value> {
     let response = http.get(url).timeout(TIMEOUT).send().await?.error_for_status()?;
     Ok(response.json().await?)
@@ -55,9 +60,17 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         fetch(http, OPENROUTER[0]),
         fetch(http, OPENROUTER[1]),
     );
+    // A list is used only when it has the expected content.
+    let litellm_prices = litellm.as_ref().map_err(copy).and_then(sources::parse_litellm);
+    let models_dev_prices = models_dev.as_ref().map_err(copy).and_then(sources::parse_models_dev);
+
     // The capability checks use the same lists: the stored model data of the connections is
     // loaded again with them (admin changes to capabilities stay).
-    catalog::store(state, models_dev.as_ref().ok(), litellm.as_ref().ok());
+    catalog::store(
+        state,
+        models_dev.as_ref().ok().filter(|_| models_dev_prices.is_ok()),
+        litellm.as_ref().ok().filter(|_| litellm_prices.is_ok()),
+    );
     let connections: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections")
         .fetch_all(&state.db)
         .await?;
@@ -83,12 +96,8 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         lists
     });
     let parsed = [
-        ("litellm", litellm.and_then(|list| sources::parse_litellm(&list)), None),
-        (
-            "models_dev",
-            models_dev.and_then(|list| sources::parse_models_dev(&list)),
-            None,
-        ),
+        ("litellm", litellm_prices, None),
+        ("models_dev", models_dev_prices, None),
         (
             "openrouter",
             openrouter.and_then(|lists| sources::parse_openrouter(&lists)),

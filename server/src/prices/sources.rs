@@ -53,34 +53,6 @@ fn litellm_tokens(entry: &Value, suffix: &str) -> TokenPrices {
     }
 }
 
-/// A context tier that raises the output price and does not list reasoning raises the
-/// reasoning price too, when the base prices reasoning like output (OpenRouter and LiteLLM
-/// list reasoning only in the base prices).
-fn tie_reasoning(mut prices: Prices) -> Prices {
-    let tied = |base: &TokenPrices, tier: &mut TokenPrices| {
-        if tier.output_reasoning.is_none() && tier.output_text.is_some() && base.output_reasoning == base.output_text {
-            tier.output_reasoning = tier.output_text;
-        }
-    };
-    let base = prices.clone();
-    for tier in &mut prices.context_tiers {
-        if base.standard.output_reasoning.is_some() {
-            tied(&base.standard, &mut tier.standard);
-        }
-        if let (Some(base), Some(tier)) = (&base.priority, &mut tier.priority)
-            && base.output_reasoning.is_some()
-        {
-            tied(base, tier);
-        }
-        if let (Some(base), Some(tier)) = (&base.flex, &mut tier.flex)
-            && base.output_reasoning.is_some()
-        {
-            tied(base, tier);
-        }
-    }
-    prices
-}
-
 fn some(prices: TokenPrices) -> Option<TokenPrices> {
     (!prices.is_empty()).then_some(prices)
 }
@@ -159,7 +131,7 @@ pub fn parse_litellm(list: &Value) -> anyhow::Result<BTreeMap<String, Prices>> {
         };
         if provider == "openrouter" {
             if key.starts_with("openrouter/") {
-                out.insert(key.clone(), tie_reasoning(litellm_prices(provider, entry)));
+                out.insert(key.clone(), litellm_prices(provider, entry));
             }
             continue;
         }
@@ -178,10 +150,7 @@ pub fn parse_litellm(list: &Value) -> anyhow::Result<BTreeMap<String, Prices>> {
         if key.contains('/') || key.contains(':') {
             continue;
         }
-        out.insert(
-            format!("{provider}/{key}"),
-            tie_reasoning(litellm_prices(provider, entry)),
-        );
+        out.insert(format!("{provider}/{key}"), litellm_prices(provider, entry));
     }
     for (key, price) in images {
         out.entry(key).or_default().images.push(price);
@@ -271,7 +240,7 @@ pub fn parse_models_dev(list: &Value) -> anyhow::Result<BTreeMap<String, Prices>
                 context_tiers,
                 ..Prices::default()
             };
-            out.insert(format!("{provider}/{id}"), tie_reasoning(prices));
+            out.insert(format!("{provider}/{id}"), prices);
         }
     }
     Ok(out)
@@ -344,7 +313,7 @@ pub fn parse_openrouter(lists: &[Value]) -> anyhow::Result<BTreeMap<String, Pric
             partial,
             ..Prices::default()
         };
-        out.insert(format!("openrouter/{id}"), tie_reasoning(prices));
+        out.insert(format!("openrouter/{id}"), prices);
     }
     Ok(out)
 }

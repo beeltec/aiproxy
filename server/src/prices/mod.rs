@@ -149,6 +149,30 @@ pub struct Prices {
 }
 
 impl Prices {
+    /// A context tier that raises the output price and does not list reasoning raises the
+    /// reasoning price too, when the base prices reasoning like output (OpenRouter and LiteLLM
+    /// list reasoning only in the base prices).
+    fn tie_reasoning(&mut self) {
+        let tied = |base: &TokenPrices, tier: &mut TokenPrices| {
+            if base.output_reasoning.is_some()
+                && base.output_reasoning == base.output_text
+                && tier.output_reasoning.is_none()
+                && tier.output_text.is_some()
+            {
+                tier.output_reasoning = tier.output_text;
+            }
+        };
+        for tier in &mut self.context_tiers {
+            tied(&self.standard, &mut tier.standard);
+            if let (Some(base), Some(tier)) = (&self.priority, &mut tier.priority) {
+                tied(base, tier);
+            }
+            if let (Some(base), Some(tier)) = (&self.flex, &mut tier.flex) {
+                tied(base, tier);
+            }
+        }
+    }
+
     /// Returns a readable message for the first invalid price.
     pub fn validate(&self) -> Result<(), String> {
         let mut numbers: Vec<f64> = Vec::new();
@@ -341,7 +365,8 @@ impl PriceCache {
         let mut book = PriceBook::default();
         for (id, source, key, prices) in rows {
             match serde_json::from_str::<Prices>(&prices) {
-                Ok(prices) => {
+                Ok(mut prices) => {
+                    prices.tie_reasoning();
                     book.versions.insert((source, key), (id, Arc::new(prices)));
                 }
                 Err(err) => tracing::error!(version = id, error = %err, "cannot read a price version"),
@@ -355,7 +380,8 @@ impl PriceCache {
         .await?;
         for (key, id, prices) in overrides {
             match serde_json::from_str::<Prices>(&prices) {
-                Ok(prices) => {
+                Ok(mut prices) => {
+                    prices.tie_reasoning();
                     book.overrides.insert(key, (id, Arc::new(prices)));
                 }
                 Err(err) => tracing::error!(version = id, error = %err, "cannot read an override"),
@@ -623,8 +649,15 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
             None => complete = false,
         }
     }
+    // Usage without any price that applies has an unknown cost (a price of 0 is a price).
+    let used = used_tokens
+        || input.web_search_calls > 0
+        || input.web_search_preview_calls > 0
+        || input.images_generated > 0
+        || input.characters > 0
+        || seconds.is_some();
     Cost {
-        nano: Some(parts.values().sum()),
+        nano: (!used || !parts.is_empty()).then(|| parts.values().sum()),
         complete,
         parts,
         version: None,

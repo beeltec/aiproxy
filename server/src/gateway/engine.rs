@@ -621,11 +621,11 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         (None, Some(response)) => Extras::from_usage(&response["usage"]),
         _ => outcome.extras.clone(),
     };
-    // An answer with several sampling steps (Anthropic continuations and iterations) has one
-    // row per step; the first step is on the model row.
+    // An answer with sampling steps (Anthropic answers, continuations and iterations) has one
+    // row per step, with the facts of the step; the first step is on the model row.
     let mut steps = match &outcome.tokens {
-        Some(_) if outcome.steps.len() > 1 => outcome.steps.clone(),
-        _ => Vec::new(),
+        Some(_) => outcome.steps.clone(),
+        None => Vec::new(),
     };
     if let Some(first) = steps.first_mut() {
         first.tokens.inexact |= outcome.searches_uncounted;
