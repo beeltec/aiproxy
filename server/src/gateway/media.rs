@@ -373,6 +373,9 @@ fn with_content_type(mut response: Response, content_type: &str) -> Response {
     response
 }
 
+/// The time that the upstream has to close the body after its last event.
+const END_WAIT: Duration = Duration::from_secs(5);
+
 /// The last events of the SSE media answers (besides the `.completed` image events).
 const TERMINAL_EVENTS: [&str; 2] = ["speech.audio.done", "transcript.text.done"];
 
@@ -409,7 +412,8 @@ fn forward(
                     let _ = tx.try_send(Ok(Bytes::from_static(b": keep-alive\n\n")));
                     continue;
                 }
-                () = tokio::time::sleep_until(idle_until) => break Some(idle()),
+                // After the last event only the end of the body is missing.
+                () = tokio::time::sleep_until(idle_until) => break if ended { None } else { Some(idle()) },
                 () = tokio::time::sleep_until(deadline) => break Some(timed_out()),
                 () = tx.closed() => break Some(engine::client_closed()),
                 () = task_state.stopping.cancelled() => break Some(shutting_down()),
@@ -422,7 +426,6 @@ fn forward(
                 None => break upstream_error.take(),
                 Some(Err(err)) => break Some(broken(&err)),
             };
-            idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
             if sse {
                 let mut pieces = chunk.split(|byte| *byte == b'\n').peekable();
                 let mut too_long = false;
@@ -475,6 +478,7 @@ fn forward(
                     break Some(engine::too_large("An event of the answer is larger than 16 MB."));
                 }
             }
+            idle_until = tokio::time::Instant::now() + if ended { END_WAIT } else { IDLE_TIMEOUT };
             tokio::select! {
                 sent = tx.send(Ok(chunk)) => if sent.is_err() {
                     break Some(engine::client_closed());
@@ -515,6 +519,28 @@ fn json_body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Failure>
 // ---------------------------------------------------------------------------------------------
 // Embeddings
 
+/// The input tokens of an embeddings request. An input can be token ids (one or more lists of
+/// numbers); each number is one token.
+async fn embedding_estimate(input: &Value) -> i64 {
+    let items = input.as_array().map(Vec::as_slice).unwrap_or_default();
+    let token_ids = |list: &[Value]| !list.is_empty() && list.iter().all(Value::is_number);
+    if token_ids(items) {
+        return items.len() as i64;
+    }
+    if !items.is_empty()
+        && items
+            .iter()
+            .all(|item| item.as_array().is_some_and(|list| token_ids(list)))
+    {
+        return items
+            .iter()
+            .filter_map(Value::as_array)
+            .map(|list| list.len() as i64)
+            .sum();
+    }
+    crate::tokens::estimate(input).await as i64
+}
+
 pub async fn embeddings(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
@@ -534,7 +560,7 @@ pub async fn embeddings(
         if kind == Kind::OpenRouter {
             provider::check_openrouter_routing(&body)?;
         }
-        let estimate = crate::tokens::estimate(&body["input"]).await as i64;
+        let estimate = embedding_estimate(&body["input"]).await;
         let reserved = reserve(&state, &key, estimate)?;
         body["model"] = json!(route.upstream_model);
         let call = Call {
@@ -753,10 +779,45 @@ fn rebuild_form(parts: &[Part], model: &str) -> Result<reqwest::multipart::Form,
 }
 
 /// Audio files that are read at the same time. The reading runs on the blocking pool, where a
-/// client that leaves cannot stop it.
+/// client that leaves cannot stop it. When all readers are busy, the length stays unknown.
 static AUDIO_READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// A file can have very many empty packets, so the reading has a time limit.
 const MAX_AUDIO_READ: Duration = Duration::from_secs(5);
+
+/// The file data for the audio reader. After the time limit every read fails, so the parser
+/// also stops in work that reads.
+struct TimedSource {
+    data: std::io::Cursor<Bytes>,
+    until: Instant,
+}
+
+impl std::io::Read for TimedSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if Instant::now() > self.until {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the audio read took too long",
+            ));
+        }
+        self.data.read(buf)
+    }
+}
+
+impl std::io::Seek for TimedSource {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.data.seek(position)
+    }
+}
+
+impl symphonia::core::io::MediaSource for TimedSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.data.get_ref().len() as u64)
+    }
+}
 /// Audio input tokens per second of the OpenAI audio models, for estimates.
 const AUDIO_TOKENS_PER_SECOND: f64 = 10.0;
 
@@ -768,8 +829,12 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
 
-    let started = Instant::now();
-    let stream = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+    let until = Instant::now() + MAX_AUDIO_READ;
+    let source = TimedSource {
+        data: std::io::Cursor::new(data),
+        until,
+    };
+    let stream = MediaSourceStream::new(Box::new(source), Default::default());
     let mut hint = Hint::new();
     if let Some(extension) = file_name
         .as_deref()
@@ -785,7 +850,7 @@ fn audio_seconds(data: Bytes, file_name: Option<String>) -> Option<f64> {
     let (id, time_base) = (track.id, track.time_base?);
     let (mut total, mut first, mut end) = (0_u64, i64::MAX, i64::MIN);
     while let Ok(Some(packet)) = reader.next_packet() {
-        if started.elapsed() > MAX_AUDIO_READ {
+        if Instant::now() > until {
             return None;
         }
         if packet.track_id == id {
@@ -858,15 +923,16 @@ async fn audio_text(
             .ok_or_else(|| bad("The field `file` is missing."))?;
         let form = rebuild_form(&parts, &route.upstream_model)?;
         let (data, file_name, bytes) = (file.data.clone(), file.file_name.clone(), file.data.len());
-        // The semaphore is never closed.
-        let permit = AUDIO_READERS.acquire().await.map_err(|_| shutting_down())?;
-        let seconds = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            audio_seconds(data, file_name)
-        })
-        .await
-        .ok()
-        .flatten();
+        let seconds = match AUDIO_READERS.try_acquire() {
+            Ok(permit) => tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                audio_seconds(data, file_name)
+            })
+            .await
+            .ok()
+            .flatten(),
+            Err(_) => None,
+        };
         // The answer has the real use; the audio tokens are estimated from the length.
         let estimate = audio_estimate(seconds, bytes);
         let reserved = reserve(&state, &key, estimate)?;
@@ -980,6 +1046,7 @@ fn image_usage(answer: &Value, images: i64, requested: &Media) -> Recorded {
             .as_str()
             .map(str::to_owned)
             .or(requested.image_quality.clone()),
+        input_images: requested.input_images,
         ..Media::default()
     };
     if usage.is_object() {
@@ -1250,6 +1317,11 @@ fn chatgpt_edit_request(parts: &[Part]) -> Result<Value, Failure> {
     Ok(request)
 }
 
+/// An uploaded input image of an edit request.
+fn is_image_part(part: &Part) -> bool {
+    part.file_name.is_some() && (part.name == "image" || part.name == "image[]")
+}
+
 pub async fn image_edits(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
@@ -1276,7 +1348,7 @@ pub async fn image_edits(
             };
             let images: Vec<String> = parts
                 .iter()
-                .filter(|p| p.file_name.is_some() && (p.name == "image" || p.name == "image[]"))
+                .filter(|p| is_image_part(p))
                 .map(|p| {
                     use base64::Engine;
                     let media_type = p.content_type.as_deref().unwrap_or("image/png");
@@ -1318,6 +1390,7 @@ pub async fn image_edits(
                 media: Media {
                     image_size: field("size"),
                     image_quality: field("quality"),
+                    input_images: parts.iter().filter(|p| is_image_part(p)).count() as i64,
                     ..Media::default()
                 },
                 started: Instant::now(),

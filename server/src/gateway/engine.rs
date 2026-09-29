@@ -586,6 +586,17 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         let calls = json!({ "output": outcome.image_calls, "tools": job.body["tools"] });
         image_tool_usage(&calls)
     });
+    // The Images API handler answers a response without an image with an error.
+    let no_image = job.client_format == "images"
+        && outcome.status == 200
+        && image_tool
+            .as_ref()
+            .is_none_or(|(_, _, _, media)| media.images_generated == 0);
+    let (status_code, error_kind) = if no_image {
+        (StatusCode::BAD_GATEWAY.as_u16(), Some("no_image".to_owned()))
+    } else {
+        (outcome.status, outcome.error_kind.clone())
+    };
     let image_estimated = image_tool
         .as_ref()
         .is_some_and(|(_, _, status, _)| *status == "estimated");
@@ -627,8 +638,8 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
             .clone()
             .or_else(|| response.and_then(|r| r["service_tier"].as_str()).map(str::to_owned)),
         streamed: job.stream,
-        status_code: outcome.status,
-        error_kind: outcome.error_kind.clone(),
+        status_code,
+        error_kind,
         latency_ms: started.elapsed().as_millis() as i64,
         first_token_ms: outcome.first_token_ms,
         usage_status,
