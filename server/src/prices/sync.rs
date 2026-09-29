@@ -69,6 +69,10 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
 
     // Without the embedding list, the chat models still get their prices, but no price ends
     // and the status shows the error.
+    let embeddings = embeddings.and_then(|list| match list["data"].is_array() {
+        true => Ok(list),
+        false => Err(anyhow::anyhow!("The list has not the expected content.")),
+    });
     let embeddings_error = embeddings
         .as_ref()
         .err()
@@ -79,15 +83,15 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         lists
     });
     let parsed = [
-        ("litellm", litellm.map(|list| sources::parse_litellm(&list)), None),
+        ("litellm", litellm.and_then(|list| sources::parse_litellm(&list)), None),
         (
             "models_dev",
-            models_dev.map(|list| sources::parse_models_dev(&list)),
+            models_dev.and_then(|list| sources::parse_models_dev(&list)),
             None,
         ),
         (
             "openrouter",
-            openrouter.map(|lists| sources::parse_openrouter(&lists)),
+            openrouter.and_then(|lists| sources::parse_openrouter(&lists)),
             embeddings_error,
         ),
     ];

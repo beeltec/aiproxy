@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::bail;
 use serde_json::Value;
 
 use super::{ContextTier, ImagePrice, Prices, TokenPrices};
@@ -16,6 +17,9 @@ pub const OPENROUTER: [&str; 2] = [
 
 /// The providers whose prices the gateway uses.
 const PROVIDERS: [&str; 3] = ["openai", "anthropic", "openrouter"];
+
+/// A LiteLLM list with fewer models is not the real list.
+const MIN_MODELS: usize = 50;
 
 /// Long-context limits in LiteLLM field names (`_above_272k_tokens`).
 const LITELLM_LIMITS: [i64; 6] = [32, 128, 200, 256, 272, 512];
@@ -47,6 +51,34 @@ fn litellm_tokens(entry: &Value, suffix: &str) -> TokenPrices {
         output_audio: field("output_cost_per_audio_token"),
         output_image: field("output_cost_per_image_token"),
     }
+}
+
+/// A context tier that raises the output price and does not list reasoning raises the
+/// reasoning price too, when the base prices reasoning like output (OpenRouter and LiteLLM
+/// list reasoning only in the base prices).
+fn tie_reasoning(mut prices: Prices) -> Prices {
+    let tied = |base: &TokenPrices, tier: &mut TokenPrices| {
+        if tier.output_reasoning.is_none() && tier.output_text.is_some() && base.output_reasoning == base.output_text {
+            tier.output_reasoning = tier.output_text;
+        }
+    };
+    let base = prices.clone();
+    for tier in &mut prices.context_tiers {
+        if base.standard.output_reasoning.is_some() {
+            tied(&base.standard, &mut tier.standard);
+        }
+        if let (Some(base), Some(tier)) = (&base.priority, &mut tier.priority)
+            && base.output_reasoning.is_some()
+        {
+            tied(base, tier);
+        }
+        if let (Some(base), Some(tier)) = (&base.flex, &mut tier.flex)
+            && base.output_reasoning.is_some()
+        {
+            tied(base, tier);
+        }
+    }
+    prices
 }
 
 fn some(prices: TokenPrices) -> Option<TokenPrices> {
@@ -118,7 +150,7 @@ fn litellm_image_key(key: &str) -> Option<(Option<&str>, String, &str)> {
     (digits(width) && digits(height)).then(|| (quality, format!("{width}x{height}"), model))
 }
 
-pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
+pub fn parse_litellm(list: &Value) -> anyhow::Result<BTreeMap<String, Prices>> {
     let mut out = BTreeMap::new();
     let mut images: Vec<(String, ImagePrice)> = Vec::new();
     for (key, entry) in list.as_object().into_iter().flatten() {
@@ -127,7 +159,7 @@ pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
         };
         if provider == "openrouter" {
             if key.starts_with("openrouter/") {
-                out.insert(key.clone(), litellm_prices(provider, entry));
+                out.insert(key.clone(), tie_reasoning(litellm_prices(provider, entry)));
             }
             continue;
         }
@@ -146,12 +178,19 @@ pub fn parse_litellm(list: &Value) -> BTreeMap<String, Prices> {
         if key.contains('/') || key.contains(':') {
             continue;
         }
-        out.insert(format!("{provider}/{key}"), litellm_prices(provider, entry));
+        out.insert(
+            format!("{provider}/{key}"),
+            tie_reasoning(litellm_prices(provider, entry)),
+        );
     }
     for (key, price) in images {
         out.entry(key).or_default().images.push(price);
     }
-    out
+    // An answer that is not the list must not end the current prices.
+    if out.len() < MIN_MODELS {
+        bail!("The list has fewer than {MIN_MODELS} models.");
+    }
+    Ok(out)
 }
 
 /// USD per token from USD per 1M tokens, rounded to 10 digits (the division leaves float
@@ -180,7 +219,10 @@ fn models_dev_tokens(cost: &Value) -> TokenPrices {
     }
 }
 
-pub fn parse_models_dev(list: &Value) -> BTreeMap<String, Prices> {
+pub fn parse_models_dev(list: &Value) -> anyhow::Result<BTreeMap<String, Prices>> {
+    if !list["openai"]["models"].is_object() || !list["anthropic"]["models"].is_object() {
+        bail!("The list has not the expected content.");
+    }
     let mut out = BTreeMap::new();
     for provider in PROVIDERS {
         for (id, model) in list[provider]["models"].as_object().into_iter().flatten() {
@@ -229,10 +271,10 @@ pub fn parse_models_dev(list: &Value) -> BTreeMap<String, Prices> {
                 context_tiers,
                 ..Prices::default()
             };
-            out.insert(format!("{provider}/{id}"), prices);
+            out.insert(format!("{provider}/{id}"), tie_reasoning(prices));
         }
     }
-    out
+    Ok(out)
 }
 
 fn openrouter_tokens(pricing: &Value) -> TokenPrices {
@@ -255,7 +297,12 @@ fn openrouter_tokens(pricing: &Value) -> TokenPrices {
 
 /// OpenRouter model lists (chat and embedding models). `-1` means a price that changes per
 /// request; such models get a variable price, so that no other list prices them.
-pub fn parse_openrouter(lists: &[Value]) -> BTreeMap<String, Prices> {
+pub fn parse_openrouter(lists: &[Value]) -> anyhow::Result<BTreeMap<String, Prices>> {
+    if lists.iter().any(|list| !list["data"].is_array())
+        || lists.first().is_none_or(|l| l["data"] == Value::Array(Vec::new()))
+    {
+        bail!("The list has not the expected content.");
+    }
     let mut out = BTreeMap::new();
     for model in lists
         .iter()
@@ -297,7 +344,7 @@ pub fn parse_openrouter(lists: &[Value]) -> BTreeMap<String, Prices> {
             partial,
             ..Prices::default()
         };
-        out.insert(format!("openrouter/{id}"), prices);
+        out.insert(format!("openrouter/{id}"), tie_reasoning(prices));
     }
-    out
+    Ok(out)
 }

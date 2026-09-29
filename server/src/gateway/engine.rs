@@ -643,9 +643,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
                 reported_cost_nano: extras.reported_cost_nano,
                 ..first.extras.clone()
             },
-            first.service_tier.clone().or_else(|| service_tier_reported.clone()),
+            // A step keeps its own tier, also when it reported none.
+            first.service_tier.clone(),
         ),
-        None => (tokens, usage_status, extras, service_tier_reported.clone()),
+        None => (tokens, usage_status, extras, service_tier_reported),
     };
     // Prices differ per search tool; a request has one of them.
     let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -713,7 +714,7 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
             component: "iteration",
             first_token_ms: None,
             usage_status: if step.estimated { "estimated" } else { usage_status },
-            service_tier_reported: step.service_tier.or_else(|| service_tier_reported.clone()),
+            service_tier_reported: step.service_tier,
             tokens: step.tokens,
             web_search_calls: 0,
             web_search_preview_calls: 0,
