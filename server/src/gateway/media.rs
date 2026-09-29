@@ -20,7 +20,7 @@ use super::auth::{Admission, ApiKey};
 use super::engine::{self, Failure, IDLE_TIMEOUT, MAX_EVENT_BYTES, MAX_OUTPUT_BYTES, Msg, TOTAL_TIMEOUT};
 use super::responses_api::error;
 use super::routing::{Route, Upstream};
-use super::{provider, request};
+use super::{provider, request, sse};
 use crate::connections::{Connection, Kind};
 use crate::crypto::random_token;
 use crate::db::now;
@@ -104,14 +104,17 @@ impl Recorded {
     }
 }
 
+/// The answer of a call and its row. A stream writes its row later.
+type Done = (Response, Option<Recorded>);
+
 /// The answer and the row of a failure before the upstream did work.
-fn failed(failure: Failure) -> (Response, Option<Recorded>) {
+fn failed(failure: Failure) -> Done {
     let recorded = Recorded::failed(&failure);
     (error(failure), Some(recorded))
 }
 
 /// The answer and the row of a failure after the upstream accepted the work.
-fn lost(failure: Failure) -> (Response, Option<Recorded>) {
+fn lost(failure: Failure) -> Done {
     let recorded = Recorded::lost(&failure);
     (error(failure), Some(recorded))
 }
@@ -141,9 +144,11 @@ async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
         recorded.tokens = call.estimate.clone();
         recorded.media = call.media.clone();
     }
-    let used = recorded.tokens.input() + recorded.tokens.output();
-    // Duration-priced audio reports no tokens; its length still counts for the limit.
-    let used = used.max(audio_estimate(recorded.media.seconds, 0));
+    let used = match recorded.tokens.input() + recorded.tokens.output() {
+        // Duration-priced audio reports no tokens; its length still counts for the limit.
+        0 => audio_estimate(recorded.media.seconds, 0),
+        used => used,
+    };
     // Without reported usage the real use is unknown, so keep at least the reservation.
     let used = if recorded.usage_status == "estimated" {
         used.max(call.reserved)
@@ -186,7 +191,7 @@ async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
 /// work and records a row.
 async fn detached<F>(state: &AppState, call: Call, work: F) -> Response
 where
-    F: Future<Output = (Response, Option<Recorded>)> + Send + 'static,
+    F: Future<Output = Done> + Send + 'static,
 {
     let (mut tx, rx) = oneshot::channel();
     let task_state = state.clone();
@@ -259,34 +264,45 @@ async fn upstream(state: &AppState, connection_id: i64, path: &str) -> Result<re
         .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))
 }
 
-/// Sends the request and maps an error answer. `streamed` answers send their headers at once;
-/// the others only when the whole answer is ready.
-async fn send(request: reqwest::RequestBuilder, streamed: bool) -> Result<reqwest::Response, Failure> {
-    let limit = if streamed {
-        provider::HEADERS_TIMEOUT
-    } else {
-        TOTAL_TIMEOUT
-    };
-    let response = tokio::time::timeout(limit, request.send())
-        .await
-        .map_err(|_| {
-            Failure::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream_timeout",
-                "The upstream did not answer in time.",
-            )
-        })?
-        .map_err(|err| {
-            Failure::new(
+/// Sends the request. The upstream must send the answer headers within `headers_within`. A
+/// failure gives the answer and the row: an error answer or a failed connection used nothing,
+/// but after a timeout or a broken connection the upstream can have done the work.
+async fn send(request: reqwest::RequestBuilder, headers_within: Duration) -> Result<reqwest::Response, Box<Done>> {
+    let response = match tokio::time::timeout(headers_within, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => {
+            let failure = Failure::new(
                 StatusCode::BAD_GATEWAY,
                 "upstream_unreachable",
                 format!("Cannot reach the upstream: {err}"),
-            )
-        })?;
+            );
+            return Err(Box::new(if err.is_connect() {
+                failed(failure)
+            } else {
+                lost(failure)
+            }));
+        }
+        Err(_) => {
+            return Err(Box::new(lost(Failure::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "The upstream did not answer in time.",
+            ))));
+        }
+    };
     if !response.status().is_success() {
-        return Err(provider::error_answer(response).await);
+        return Err(Box::new(failed(provider::error_answer(response).await)));
     }
     Ok(response)
+}
+
+/// Without streaming, the upstream sends the headers only when the whole answer is ready.
+fn headers_limit(streamed: bool) -> Duration {
+    if streamed {
+        provider::HEADERS_TIMEOUT
+    } else {
+        TOTAL_TIMEOUT
+    }
 }
 
 fn content_type(response: &reqwest::Response) -> String {
@@ -382,22 +398,31 @@ fn forward(
         let mut last = None;
         let mut ended = false;
         let mut upstream_error = None;
+        // A keep-alive comment may only go between two events.
+        let mut between_events = true;
+        let mut idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
         let failure = loop {
             let next = tokio::select! {
-                next = tokio::time::timeout(IDLE_TIMEOUT, chunks.next()) => next,
+                next = chunks.next() => next,
+                () = tokio::time::sleep(sse::PING_AFTER), if sse && between_events => {
+                    // A full channel already has data for the client.
+                    let _ = tx.try_send(Ok(Bytes::from_static(b": keep-alive\n\n")));
+                    continue;
+                }
+                () = tokio::time::sleep_until(idle_until) => break Some(idle()),
                 () = tokio::time::sleep_until(deadline) => break Some(timed_out()),
                 () = tx.closed() => break Some(engine::client_closed()),
                 () = task_state.stopping.cancelled() => break Some(shutting_down()),
             };
             let chunk = match next {
-                Ok(Some(Ok(chunk))) => chunk,
-                Ok(None) if sse && !ended => {
+                Some(Ok(chunk)) => chunk,
+                None if sse && !ended => {
                     break Some(upstream_error.take().unwrap_or_else(ended_early));
                 }
-                Ok(None) => break upstream_error.take(),
-                Ok(Some(Err(err))) => break Some(broken(&err)),
-                Err(_) => break Some(idle()),
+                None => break upstream_error.take(),
+                Some(Err(err)) => break Some(broken(&err)),
             };
+            idle_until = tokio::time::Instant::now() + IDLE_TIMEOUT;
             if sse {
                 let mut pieces = chunk.split(|byte| *byte == b'\n').peekable();
                 let mut too_long = false;
@@ -409,8 +434,13 @@ fn forward(
                     line.extend_from_slice(piece);
                     // The last piece has no line end yet.
                     if pieces.peek().is_none() {
+                        if !line.is_empty() {
+                            between_events = false;
+                        }
                         break;
                     }
+                    // An empty line ends an event.
+                    between_events = line.is_empty() || line == b"\r";
                     let data = line
                         .strip_suffix(b"\r")
                         .unwrap_or(&line)
@@ -465,7 +495,13 @@ fn forward(
         record(&task_state, &call, recorded).await;
     });
     let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
-    with_content_type(Body::from_stream(stream).into_response(), &content_type)
+    let mut response = with_content_type(Body::from_stream(stream).into_response(), &content_type);
+    if sse {
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    }
+    response
 }
 
 fn json_body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Failure> {
@@ -531,9 +567,9 @@ pub async fn embeddings(
             Ok(request) => request,
             Err(failure) => return failed(failure),
         };
-        let response = match send(request.json(&body), false).await {
+        let response = match send(request.json(&body), TOTAL_TIMEOUT).await {
             Ok(response) => response,
-            Err(failure) => return failed(failure),
+            Err(done) => return *done,
         };
         let answer = match read_json(response).await {
             Ok(answer) => answer,
@@ -557,6 +593,9 @@ pub async fn embeddings(
 // ---------------------------------------------------------------------------------------------
 // Speech
 
+/// Audio output tokens per input character of the OpenAI speech models, for estimates.
+const SPEECH_TOKENS_PER_CHARACTER: i64 = 4;
+
 pub async fn speech(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
@@ -571,8 +610,16 @@ pub async fn speech(
             .as_str()
             .ok_or_else(|| bad("The field `input` is missing."))?
             .to_owned();
+        // A custom voice is stored in the provider account, so other keys could use it.
+        if body["voice"].is_object() {
+            return Err(bad(
+                "Custom voices (`voice.id`) are not supported. Use a built-in voice.",
+            ));
+        }
+        let characters = input.chars().count() as i64;
         let estimate = crate::tokens::estimate(&json!(input)).await as i64;
-        let reserved = reserve(&state, &key, estimate)?;
+        let audio = characters * SPEECH_TOKENS_PER_CHARACTER;
+        let reserved = reserve(&state, &key, estimate + audio)?;
         body["model"] = json!(route.upstream_model);
         let streamed = body["stream_format"] == "sse";
         let call = Call {
@@ -585,10 +632,11 @@ pub async fn speech(
             reserved,
             estimate: Tokens {
                 input_text: estimate,
+                output_audio: audio,
                 ..Tokens::default()
             },
             media: Media {
-                characters: input.chars().count() as i64,
+                characters,
                 ..Media::default()
             },
             started: Instant::now(),
@@ -609,9 +657,9 @@ pub async fn speech(
             Err(failure) => return failed(failure),
         };
         // Binary audio also comes in chunks, so the headers come at once.
-        let response = match send(request.json(&body), true).await {
+        let response = match send(request.json(&body), provider::HEADERS_TIMEOUT).await {
             Ok(response) => response,
-            Err(failure) => return failed(failure),
+            Err(done) => return *done,
         };
         // Binary audio has no usage; SSE ends with an event that has it.
         let media = stream_call.media.clone();
@@ -856,9 +904,9 @@ async fn audio_text(
             Ok(request) => request,
             Err(failure) => return failed(failure),
         };
-        let response = match send(request.multipart(form), stream_call.streamed).await {
+        let response = match send(request.multipart(form), headers_limit(stream_call.streamed)).await {
             Ok(response) => response,
-            Err(failure) => return failed(failure),
+            Err(done) => return *done,
         };
         if stream_call.streamed {
             let finish = move |event: Option<Value>| transcription_usage(event.as_ref().map(|e| &e["usage"]), seconds);
@@ -954,9 +1002,10 @@ async fn native_images(state: &AppState, call: Call, path: &'static str, body: I
             ImageBody::Json(body) => request.json(&body),
             ImageBody::Form(form) => request.multipart(form),
         };
-        let response = match send(request, stream_call.streamed).await {
+        // An image stream sends its headers with the first image, which can take minutes.
+        let response = match send(request, TOTAL_TIMEOUT).await {
             Ok(response) => response,
-            Err(failure) => return failed(failure),
+            Err(done) => return *done,
         };
         if stream_call.streamed {
             // A stream makes one image; its `completed` event has the usage.

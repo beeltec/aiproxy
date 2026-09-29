@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use super::engine::Msg;
 
 /// A ping after this much silence. Claude Code stops after 300 s without data.
-const PING_AFTER: Duration = Duration::from_secs(15);
+pub(super) const PING_AFTER: Duration = Duration::from_secs(15);
 
 /// Turns engine messages into client SSE bytes. `encode` returns the bytes for one message;
 /// `ping` is sent after silence.

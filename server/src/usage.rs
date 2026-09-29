@@ -1,7 +1,7 @@
 //! Usage records. Handlers send rows to one writer task through a bounded queue.
 
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{mpsc, oneshot};
 
 /// Token counts as billing categories that do not overlap.
@@ -195,7 +195,8 @@ pub struct Row {
 }
 
 enum Job {
-    Row(Box<Row>),
+    /// The rows of one request (its billing components).
+    Rows(Vec<Row>),
     /// Answers when all rows queued before it are saved.
     Flush(oneshot::Sender<()>),
 }
@@ -214,9 +215,10 @@ impl UsageWriter {
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 match job {
-                    Job::Row(row) => {
-                        if let Err(err) = insert(&db, &row).await {
-                            tracing::error!(error = %err, request = %row.request_id, "cannot save a usage row");
+                    Job::Rows(rows) => {
+                        if let Err(err) = insert_all(&db, &rows).await {
+                            let request = rows.first().map(|row| row.request_id.as_str()).unwrap_or_default();
+                            tracing::error!(error = %err, request, "cannot save the usage rows");
                         }
                     }
                     Job::Flush(done) => {
@@ -230,7 +232,12 @@ impl UsageWriter {
 
     /// Queues a row. When the queue is full, this waits (no row is lost).
     pub async fn record(&self, row: Row) {
-        if self.sender.send(Job::Row(Box::new(row))).await.is_err() {
+        self.record_all(vec![row]).await;
+    }
+
+    /// Queues the rows of one request. They are saved together or not at all.
+    pub async fn record_all(&self, rows: Vec<Row>) {
+        if self.sender.send(Job::Rows(rows)).await.is_err() {
             tracing::error!("the usage writer stopped");
         }
     }
@@ -244,7 +251,15 @@ impl UsageWriter {
     }
 }
 
-async fn insert(db: &SqlitePool, row: &Row) -> Result<(), sqlx::Error> {
+async fn insert_all(db: &SqlitePool, rows: &[Row]) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    for row in rows {
+        insert(&mut tx, row).await?;
+    }
+    tx.commit().await
+}
+
+async fn insert(db: &mut SqliteConnection, row: &Row) -> Result<(), sqlx::Error> {
     let t = &row.tokens;
     // Rows of deleted keys, accounts or connections keep NULL, so the insert does not fail on
     // the foreign key.

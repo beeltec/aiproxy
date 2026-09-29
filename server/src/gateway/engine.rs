@@ -655,10 +655,10 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         media,
         ..row.clone()
     });
-    state.usage.record(row).await;
-    if let Some(image_row) = image_row {
-        state.usage.record(image_row).await;
-    }
+    state
+        .usage
+        .record_all(std::iter::once(row).chain(image_row).collect())
+        .await;
 }
 
 /// Images in the request input (content parts and tool outputs).
