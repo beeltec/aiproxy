@@ -54,6 +54,7 @@ async fn fetch(http: &reqwest::Client, url: &str) -> anyhow::Result<Value> {
 pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
     let _running = state.price_sync.lock().await;
     let http = &state.http;
+    let started = std::time::Instant::now();
     let (litellm, models_dev, openrouter, embeddings) = tokio::join!(
         fetch(http, LITELLM),
         fetch(http, MODELS_DEV),
@@ -70,6 +71,7 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         state,
         models_dev.as_ref().ok().filter(|_| models_dev_prices.is_ok()),
         litellm.as_ref().ok().filter(|_| litellm_prices.is_ok()),
+        started,
     );
     let connections: Vec<i64> = sqlx::query_scalar("SELECT id FROM connections")
         .fetch_all(&state.db)

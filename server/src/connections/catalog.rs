@@ -32,25 +32,49 @@ impl Catalog {
     }
 }
 
+#[derive(Clone)]
+struct Cached {
+    catalog: Arc<Catalog>,
+    /// When the downloads of the catalog started.
+    loaded_at: Instant,
+    next_load: Instant,
+}
+
 #[derive(Default)]
-/// The catalog and the time of its next load.
-pub struct CatalogCache(Mutex<Option<(Instant, Arc<Catalog>)>>);
+pub struct CatalogCache(Mutex<Option<Cached>>);
+
+impl CatalogCache {
+    fn current(&self) -> Option<Cached> {
+        self.0.lock().expect("catalog lock").clone()
+    }
+
+    /// Publishes a catalog, unless a catalog from later downloads is there already.
+    fn publish(&self, catalog: Arc<Catalog>, loaded_at: Instant, complete: bool) -> Arc<Catalog> {
+        let mut cached = self.0.lock().expect("catalog lock");
+        if let Some(newer) = cached.as_ref().filter(|c| c.loaded_at > loaded_at) {
+            return newer.catalog.clone();
+        }
+        // A failed source is tried again soon; the other source is used meanwhile.
+        let next_load = Instant::now() + if complete { MAX_AGE } else { RETRY_AFTER };
+        *cached = Some(Cached {
+            catalog: catalog.clone(),
+            loaded_at,
+            next_load,
+        });
+        catalog
+    }
+}
 
 /// The current catalog. When a download fails, the last good catalog (or an empty one) is used.
 pub async fn get(state: &AppState) -> Arc<Catalog> {
-    let cached = state.catalog.0.lock().expect("catalog lock").clone();
-    if let Some((next_load, catalog)) = &cached
-        && Instant::now() < *next_load
-    {
-        return catalog.clone();
+    let cached = state.catalog.current();
+    if let Some(cached) = cached.as_ref().filter(|c| Instant::now() < c.next_load) {
+        return cached.catalog.clone();
     }
-    let old = cached.map(|(_, catalog)| catalog);
+    let started = Instant::now();
+    let old = cached.map(|c| c.catalog);
     let (catalog, complete) = load(&state.http, old.as_deref()).await;
-    let catalog = Arc::new(catalog);
-    // A failed source is tried again soon; the other source is used meanwhile.
-    let next_load = Instant::now() + if complete { MAX_AGE } else { RETRY_AFTER };
-    *state.catalog.0.lock().expect("catalog lock") = Some((next_load, catalog.clone()));
-    catalog
+    state.catalog.publish(Arc::new(catalog), started, complete)
 }
 
 async fn fetch(http: &reqwest::Client, url: &str) -> anyhow::Result<Value> {
@@ -73,18 +97,12 @@ async fn load(http: &reqwest::Client, old: Option<&Catalog>) -> (Catalog, bool) 
 
 /// Replaces the catalog with lists that the price sync loaded. A missing list keeps its old
 /// entries and is loaded again soon.
-pub fn store(state: &AppState, models_dev: Option<&Value>, litellm: Option<&Value>) {
-    let old = state
-        .catalog
-        .0
-        .lock()
-        .expect("catalog lock")
-        .clone()
-        .map(|(_, catalog)| catalog);
+/// `loaded_at` is when the downloads started.
+pub fn store(state: &AppState, models_dev: Option<&Value>, litellm: Option<&Value>, loaded_at: Instant) {
+    let old = state.catalog.current().map(|c| c.catalog);
     let catalog = Arc::new(build(models_dev, litellm, old.as_deref()));
     let complete = models_dev.is_some() && litellm.is_some();
-    let next_load = Instant::now() + if complete { MAX_AGE } else { RETRY_AFTER };
-    *state.catalog.0.lock().expect("catalog lock") = Some((next_load, catalog));
+    state.catalog.publish(catalog, loaded_at, complete);
 }
 
 fn build(models_dev: Option<&Value>, litellm: Option<&Value>, old: Option<&Catalog>) -> Catalog {

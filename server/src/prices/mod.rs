@@ -153,10 +153,11 @@ impl Prices {
     /// reasoning price too, when the base prices reasoning like output: with no reasoning price
     /// or the same one (OpenRouter and LiteLLM list reasoning only in the base prices).
     fn tie_reasoning(&mut self) {
-        // The base prices of a service tier, per field with the standard prices for missing
-        // fields.
+        // The base prices of a service tier as `cost` uses them: reasoning without a price is
+        // priced like output in the same tier, a missing field uses the standard price.
         let base = |tier: Option<&TokenPrices>| {
-            let reasoning = tier.and_then(|t| t.output_reasoning).or(self.standard.output_reasoning);
+            let effective = |t: &TokenPrices| t.output_reasoning.or(t.output_text);
+            let reasoning = tier.and_then(effective).or(effective(&self.standard));
             let output = tier.and_then(|t| t.output_text).or(self.standard.output_text);
             reasoning.is_none() || reasoning == output
         };
