@@ -205,6 +205,7 @@ fn check_native_blocks(body: &Value) -> Result<(), Failure> {
             if !known {
                 return Err(bad(format!("The content block `{kind}` is not supported.")));
             }
+            check_source(block)?;
             let nested = block["content"].as_array().into_iter().flatten();
             for inner in nested.filter(|_| kind == "tool_result") {
                 if !matches!(
@@ -215,8 +216,27 @@ fn check_native_blocks(body: &Value) -> Result<(), Failure> {
                         "A tool result can hold only text, image, document and search result blocks.",
                     ));
                 }
+                check_source(inner)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Images and documents may carry only inline data or URLs, also inside inline documents: a
+/// stored file would be read with the shared provider key.
+fn check_source(block: &Value) -> Result<(), Failure> {
+    let source = &block["source"];
+    if source.is_null() {
+        return Ok(());
+    }
+    if !matches!(source["type"].as_str(), Some("base64" | "url" | "text" | "content")) || !source["file_id"].is_null() {
+        return Err(bad(
+            "References to stored files are not supported. Send the content inline.",
+        ));
+    }
+    for nested in source["content"].as_array().into_iter().flatten() {
+        check_source(nested)?;
     }
     Ok(())
 }
