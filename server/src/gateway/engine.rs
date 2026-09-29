@@ -17,7 +17,7 @@ use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
 use crate::state::AppState;
-use crate::usage::{Extras, Media, Row, Tokens};
+use crate::usage::{Extras, Media, Row, Step, Tokens};
 
 /// Longest time without any upstream event.
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -126,9 +126,8 @@ pub(super) struct Outcome {
     pub tokens: Option<Tokens>,
     /// The usage facts besides the tokens, with `tokens`.
     pub extras: Extras,
-    /// The sampling steps of `tokens` (Anthropic answers and their iterations). Each step
-    /// with its own row, so that the price of long requests applies per step.
-    pub steps: Vec<Tokens>,
+    /// The sampling steps of `tokens` (Anthropic answers and their iterations).
+    pub steps: Vec<Step>,
     /// The service tier that a native Chat or Messages answer reported.
     pub service_tier: Option<String>,
     pub first_token_ms: Option<i64>,
@@ -629,9 +628,20 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         _ => Vec::new(),
     };
     if let Some(first) = steps.first_mut() {
-        first.inexact |= outcome.searches_uncounted;
+        first.tokens.inexact |= outcome.searches_uncounted;
     }
-    let row_tokens = steps.first().cloned().unwrap_or(tokens);
+    // Each step keeps its own facts; the reported cost is for the whole request.
+    let (row_tokens, row_status, row_extras) = match steps.first() {
+        Some(first) => (
+            first.tokens.clone(),
+            if first.estimated { "estimated" } else { usage_status },
+            Extras {
+                reported_cost_nano: extras.reported_cost_nano,
+                ..first.extras.clone()
+            },
+        ),
+        None => (tokens, usage_status, extras),
+    };
     // Prices differ per search tool; a request has one of them.
     let tools = job.body["tools"].as_array().map(Vec::as_slice).unwrap_or_default();
     let preview_search = tools.iter().any(|tool| tool["type"] == "web_search_preview")
@@ -666,12 +676,12 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         error_kind,
         latency_ms: started.elapsed().as_millis() as i64,
         first_token_ms: outcome.first_token_ms,
-        usage_status,
+        usage_status: row_status,
         tokens: row_tokens,
         web_search_calls: if preview_search { 0 } else { outcome.web_search_calls },
         web_search_preview_calls: if preview_search { outcome.web_search_calls } else { 0 },
         failover_attempts: (outcome.attempts - 1).max(0),
-        extras,
+        extras: row_extras,
         media: Media {
             input_images: input_images(&job.body["input"]),
             ..Media::default()
@@ -700,14 +710,12 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         .map(|step| Row {
             component: "iteration",
             first_token_ms: None,
-            tokens: step,
+            usage_status: if step.estimated { "estimated" } else { usage_status },
+            tokens: step.tokens,
             web_search_calls: 0,
             web_search_preview_calls: 0,
             media: Media::default(),
-            extras: Extras {
-                reported_cost_nano: None,
-                ..row.extras.clone()
-            },
+            extras: step.extras,
             ..row.clone()
         })
         .collect();

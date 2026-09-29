@@ -94,16 +94,6 @@ impl Tokens {
         }
     }
 
-    /// The sampling steps of an Anthropic answer. With `iterations` (compaction), each step
-    /// has its own usage, and the top-level usage leaves some steps out. Without them, the
-    /// answer is one step.
-    pub fn anthropic_steps(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
-        match usage["iterations"].as_array().filter(|steps| !steps.is_empty()) {
-            Some(steps) => steps.iter().map(|step| Self::from_anthropic(step, ttl)).collect(),
-            None => vec![Self::from_anthropic(usage, ttl)],
-        }
-    }
-
     pub fn add(&mut self, other: &Self) {
         self.input_text += other.input_text;
         self.input_text_cached += other.input_text_cached;
@@ -118,12 +108,6 @@ impl Tokens {
         self.output_audio += other.output_audio;
         self.output_image += other.output_image;
         self.inexact |= other.inexact;
-    }
-
-    pub fn sum(steps: &[Self]) -> Self {
-        let mut total = Self::default();
-        steps.iter().for_each(|step| total.add(step));
-        total
     }
 
     /// Splits the usage of an image model (Images API, image-generation tool). Without cache
@@ -182,6 +166,41 @@ impl Tokens {
 
     pub fn output(&self) -> i64 {
         self.output_text + self.output_reasoning + self.output_audio + self.output_image
+    }
+}
+
+/// One sampling step of an answer. Each step has its own usage row, so that the price of long
+/// requests applies per step.
+#[derive(Clone, Debug, Default)]
+pub struct Step {
+    pub tokens: Tokens,
+    /// The facts of the answer that the step belongs to (speed, geography).
+    pub extras: Extras,
+    /// The final usage of the step is missing; its tokens are estimated.
+    pub estimated: bool,
+}
+
+impl Step {
+    /// The steps of an Anthropic answer. With `iterations` (compaction), each step has its own
+    /// usage, and the top-level usage leaves some steps out. Without them, the answer is one
+    /// step.
+    pub fn anthropic(usage: &Value, ttl: Option<&str>) -> Vec<Self> {
+        let extras = Extras::from_usage(usage);
+        let step = |tokens| Self {
+            tokens,
+            extras: extras.clone(),
+            estimated: false,
+        };
+        match usage["iterations"].as_array().filter(|steps| !steps.is_empty()) {
+            Some(steps) => steps.iter().map(|s| step(Tokens::from_anthropic(s, ttl))).collect(),
+            None => vec![step(Tokens::from_anthropic(usage, ttl))],
+        }
+    }
+
+    pub fn total(steps: &[Self]) -> Tokens {
+        let mut total = Tokens::default();
+        steps.iter().for_each(|step| total.add(&step.tokens));
+        total
     }
 }
 

@@ -308,15 +308,20 @@ pub struct PriceBook {
 
 /// The price book, replaced after a sync or an override change.
 #[derive(Clone, Default)]
-pub struct PriceCache(Arc<RwLock<Arc<PriceBook>>>);
+pub struct PriceCache {
+    book: Arc<RwLock<Arc<PriceBook>>>,
+    /// One reload at a time, so an older snapshot cannot replace a newer one.
+    reloading: Arc<tokio::sync::Mutex<()>>,
+}
 
 impl PriceCache {
     pub fn get(&self) -> Arc<PriceBook> {
-        self.0.read().expect("price cache lock").clone()
+        self.book.read().expect("price cache lock").clone()
     }
 
     /// Loads the price book from the database.
     pub async fn reload(&self, db: &SqlitePool) -> Result<(), sqlx::Error> {
+        let _reloading = self.reloading.lock().await;
         let rows: Vec<(i64, String, String, String)> =
             sqlx::query_as("SELECT id, source, model_key, prices FROM price_versions WHERE current = 1")
                 .fetch_all(db)
@@ -344,7 +349,7 @@ impl PriceCache {
                 Err(err) => tracing::error!(version = id, error = %err, "cannot read an override"),
             }
         }
-        *self.0.write().expect("price cache lock") = Arc::new(book);
+        *self.book.write().expect("price cache lock") = Arc::new(book);
         Ok(())
     }
 }
@@ -408,11 +413,20 @@ impl PriceBook {
                 .flatten();
             self.resolve(client, kind, model)
         });
+        // These models bill a fixed block of search tokens per call, which no list describes.
+        let fixed_search_tokens = input.web_search_calls > 0
+            && input.priced_model().is_some_and(|(kind, model)| {
+                kind == "openai" && FIXED_SEARCH_TOKENS.iter().any(|m| model.starts_with(m))
+            });
         match resolved {
-            Some(resolved) => Cost {
-                version: Some(resolved.version),
-                ..cost(input, &resolved.prices)
-            },
+            Some(resolved) => {
+                let cost = cost(input, &resolved.prices);
+                Cost {
+                    version: Some(resolved.version),
+                    complete: cost.complete && !fixed_search_tokens,
+                    ..cost
+                }
+            }
             None if nothing_used(input) => Cost {
                 nano: Some(0),
                 complete: input.usage_status != "estimated",
@@ -422,6 +436,9 @@ impl PriceBook {
         }
     }
 }
+
+/// OpenAI models whose `web_search` calls add a fixed number of input tokens.
+const FIXED_SEARCH_TOKENS: [&str; 2] = ["gpt-4o-mini", "gpt-4.1-mini"];
 
 /// Model ids without a date suffix (`-2025-08-07`, `-20251001`) or a `-codex` suffix.
 fn undated(model: &str) -> Option<String> {
@@ -471,30 +488,40 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
         }
     };
     let pick = |standard: &TokenPrices, priority: &Option<TokenPrices>, flex: &Option<TokenPrices>| match tier {
-        "priority" => priority.clone(),
-        "flex" => flex.clone(),
-        _ => Some(standard.clone()),
+        "priority" => priority.as_ref().map(TokenPrices::values),
+        "flex" => flex.as_ref().map(TokenPrices::values),
+        _ => Some(standard.values()),
     };
-    let base = pick(&prices.standard, &prices.priority, &prices.flex).unwrap_or_else(|| {
-        complete = false;
-        prices.standard.clone()
-    });
+    // A tier price that is missing uses the standard price; the cost is then not complete.
+    let mut effective = prices.standard.values();
+    let mut from_standard = [false; 12];
+    if tier != "standard" {
+        let tier_values = pick(&prices.standard, &prices.priority, &prices.flex).unwrap_or([None; 12]);
+        for category in 0..12 {
+            match tier_values[category] {
+                Some(price) => effective[category] = Some(price),
+                None => from_standard[category] = true,
+            }
+        }
+    }
     // The whole request uses the prices of the highest context tier that its input is above.
+    // A price that the tier does not list stays as below the limit.
     let input_total: i64 = tokens[..8].iter().sum();
     let context = prices
         .context_tiers
         .iter()
         .filter(|t| input_total > t.above)
         .max_by_key(|t| t.above);
-    let mut effective: [Option<f64>; 12] = base.values();
     if let Some(context) = context {
-        let above = pick(&context.standard, &context.priority, &context.flex).unwrap_or_else(|| {
-            complete = false;
-            context.standard.clone()
-        });
-        for (price, above) in effective.iter_mut().zip(above.values()) {
-            if above.is_some() {
-                *price = above;
+        // The tier's own prices above the limit, else the standard ones (then not complete).
+        let (values, exact) = match pick(&context.standard, &context.priority, &context.flex) {
+            Some(values) => (values, true),
+            None => (context.standard.values(), false),
+        };
+        for category in 0..12 {
+            if let Some(price) = values[category] {
+                effective[category] = Some(price);
+                from_standard[category] = !exact;
             }
         }
     }
@@ -527,10 +554,10 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
     };
 
     let used_tokens = tokens.iter().any(|n| *n > 0);
-    let tokens_priced = (0..12).all(|category| tokens[category] == 0 || effective[category].is_some());
-    // A model priced per unit (image, character, second) without token prices uses the unit
-    // price; its tokens are then only a measure.
-    let per_unit = |quantity: bool, price: bool| quantity && price && (!used_tokens || !tokens_priced);
+    let no_token_price = (0..12).all(|category| tokens[category] == 0 || effective[category].is_none());
+    // A model priced per unit (image, character, second) without prices for the used tokens
+    // uses the unit price; its tokens are then only a measure.
+    let per_unit = |quantity: bool, price: bool| quantity && price && no_token_price;
     let per_image = image_price(prices, input);
     let use_images = per_unit(input.images_generated > 0, per_image.is_some());
     let use_characters = per_unit(input.characters > 0, prices.per_character.is_some());
@@ -559,12 +586,17 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
             match effective[category] {
                 Some(price) => {
                     parts.insert(CATEGORIES[category], nano(tokens[category] as f64 * price * geo));
+                    if from_standard[category] {
+                        complete = false;
+                    }
                 }
                 None => complete = false,
             }
         }
-        // Images of a model without image tokens in its usage need a unit price.
-        if input.images_generated > 0 && tokens[11] == 0 && per_image.is_none() {
+        // Images, characters and seconds without tokens need a unit price.
+        let unpriced_units = (input.images_generated > 0 && tokens[11] == 0)
+            || (!used_tokens && (input.characters > 0 || seconds.is_some()));
+        if unpriced_units {
             complete = false;
         }
     }

@@ -58,8 +58,9 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
     // The capability checks use the same lists.
     catalog::store(state, models_dev.as_ref().ok(), litellm.as_ref().ok());
 
+    // Without the embedding list, the chat models still get their prices, but no price ends.
+    let complete_openrouter = embeddings.is_ok();
     let openrouter = openrouter.map(|models| {
-        // Without the embedding list, the chat models still have prices.
         let mut lists = vec![models];
         match embeddings {
             Ok(embeddings) => lists.push(embeddings),
@@ -68,14 +69,22 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
         lists
     });
     let parsed = [
-        ("litellm", litellm.map(|list| sources::parse_litellm(&list))),
-        ("models_dev", models_dev.map(|list| sources::parse_models_dev(&list))),
-        ("openrouter", openrouter.map(|lists| sources::parse_openrouter(&lists))),
+        ("litellm", litellm.map(|list| sources::parse_litellm(&list)), true),
+        (
+            "models_dev",
+            models_dev.map(|list| sources::parse_models_dev(&list)),
+            true,
+        ),
+        (
+            "openrouter",
+            openrouter.map(|lists| sources::parse_openrouter(&lists)),
+            complete_openrouter,
+        ),
     ];
-    for (source, prices) in parsed {
+    for (source, prices, complete) in parsed {
         match prices {
             Ok(prices) => {
-                let changed = save(&state.db, source, &prices).await?;
+                let changed = save(&state.db, source, &prices, complete).await?;
                 tracing::info!(source, models = prices.len(), changed, "price list loaded");
                 set_status(&state.db, source, None, prices.len()).await?;
             }
@@ -106,8 +115,15 @@ async fn set_status(db: &SqlitePool, source: &str, error: Option<&str>, entries:
     Ok(())
 }
 
-/// Saves a new current version for each model whose prices changed. Returns the count.
-async fn save(db: &SqlitePool, source: &str, prices: &BTreeMap<String, Prices>) -> Result<usize, sqlx::Error> {
+/// Saves a new current version for each model whose prices changed. When the list is
+/// `complete`, the current version of models that it no longer prices ends. Returns the count
+/// of changes.
+async fn save(
+    db: &SqlitePool,
+    source: &str,
+    prices: &BTreeMap<String, Prices>,
+    complete: bool,
+) -> Result<usize, sqlx::Error> {
     let current: Vec<(String, String)> =
         sqlx::query_as("SELECT model_key, prices FROM price_versions WHERE source = ? AND current = 1")
             .bind(source)
@@ -136,6 +152,14 @@ async fn save(db: &SqlitePool, source: &str, prices: &BTreeMap<String, Prices>) 
         .bind(created)
         .execute(&mut *tx)
         .await?;
+        changed += 1;
+    }
+    for key in current.keys().filter(|key| complete && !prices.contains_key(*key)) {
+        sqlx::query("UPDATE price_versions SET current = 0 WHERE source = ? AND model_key = ? AND current = 1")
+            .bind(source)
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
         changed += 1;
     }
     tx.commit().await?;

@@ -18,7 +18,7 @@ use super::engine::{
 use super::{sse, upstream_chat, upstream_messages};
 use crate::connections::{Connection, Kind};
 use crate::state::AppState;
-use crate::usage::{Extras, Tokens};
+use crate::usage::{Extras, Step, Tokens};
 
 pub(super) const HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -99,7 +99,7 @@ pub trait Decoder: Send {
         Extras::default()
     }
     /// The sampling steps, when the answer had more than one (Anthropic).
-    fn steps(&self) -> Vec<Tokens> {
+    fn steps(&self) -> Vec<Step> {
         Vec::new()
     }
     /// The complete upstream content of the answer (Anthropic blocks).
@@ -835,8 +835,8 @@ fn record_native(wire: Wire, answer: &Value, ttl: Option<&str>, outcome: &mut Ou
         Wire::Messages => {
             outcome.service_tier = answer["usage"]["service_tier"].as_str().map(str::to_owned);
             if answer["usage"].is_object() {
-                outcome.steps = Tokens::anthropic_steps(&answer["usage"], ttl);
-                outcome.tokens = Some(Tokens::sum(&outcome.steps));
+                outcome.steps = Step::anthropic(&answer["usage"], ttl);
+                outcome.tokens = Some(Step::total(&outcome.steps));
                 outcome.extras = Extras::from_usage(&answer["usage"]);
                 outcome.web_search_calls = answer["usage"]["server_tool_use"]["web_search_requests"]
                     .as_i64()
@@ -959,8 +959,8 @@ impl Tap {
                                 self.anthropic_usage[key] = value.clone();
                             }
                         }
-                        outcome.steps = Tokens::anthropic_steps(&self.anthropic_usage, ttl);
-                        outcome.tokens = Some(Tokens::sum(&outcome.steps));
+                        outcome.steps = Step::anthropic(&self.anthropic_usage, ttl);
+                        outcome.tokens = Some(Step::total(&outcome.steps));
                         outcome.extras = Extras::from_usage(&self.anthropic_usage);
                         outcome.web_search_calls = self.anthropic_usage["server_tool_use"]["web_search_requests"]
                             .as_i64()

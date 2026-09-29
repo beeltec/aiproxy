@@ -13,7 +13,7 @@ use super::provider::Decoder;
 use super::routing::{Alias, Route};
 use crate::crypto::random_token;
 use crate::db::now;
-use crate::usage::{Extras, Tokens};
+use crate::usage::{Extras, Step, Tokens};
 
 /// Anthropic thinking blocks go to Responses clients inside encrypted reasoning with this prefix.
 const THINKING_PREFIX: &str = "aipa1:";
@@ -682,7 +682,7 @@ pub struct MessagesDecoder {
     raw: HashMap<i64, Value>,
     usage: Value,
     /// The sampling steps of the answers that ended (answers, and iterations in them).
-    steps: Vec<Tokens>,
+    steps: Vec<Step>,
     /// The facts of the last answer that ended.
     extras: Extras,
     stop_reason: Option<String>,
@@ -1050,7 +1050,7 @@ impl MessagesDecoder {
         };
         let mut response = json!({ "id": self.id, "object": "response", "created_at": self.created, "model": self.model,
                                    "status": if incomplete.is_some() { "incomplete" } else { "completed" },
-                                   "output": output, "usage": Tokens::sum(&self.steps).to_responses_usage() });
+                                   "output": output, "usage": Step::total(&self.steps).to_responses_usage() });
         if let Some(tier) = &self.service_tier {
             response["service_tier"] = json!(tier);
         }
@@ -1069,8 +1069,7 @@ impl MessagesDecoder {
     fn add_usage(&mut self) {
         self.answers += 1;
         self.answer_chars = 0;
-        self.steps
-            .extend(Tokens::anthropic_steps(&self.usage, self.ttl.as_deref()));
+        self.steps.extend(Step::anthropic(&self.usage, self.ttl.as_deref()));
         self.extras = Extras::from_usage(&self.usage);
         self.usage = Value::Null;
     }
@@ -1151,12 +1150,12 @@ impl Decoder for MessagesDecoder {
 
     /// Unknown until the first upstream answer ended; then the engine estimates instead.
     fn tokens(&self) -> Option<Tokens> {
-        (self.answers > 0).then(|| Tokens::sum(&self.steps()))
+        (self.answers > 0).then(|| Step::total(&self.steps()))
     }
 
     /// A continuation that broke off adds what its usage showed so far, as a step that is not
     /// exact.
-    fn steps(&self) -> Vec<Tokens> {
+    fn steps(&self) -> Vec<Step> {
         if self.answers == 0 {
             return Vec::new();
         }
@@ -1167,7 +1166,11 @@ impl Decoder for MessagesDecoder {
             // least (about 4 characters per token).
             partial.output_text = partial.output_text.max((self.answer_chars / 4) as i64);
             partial.inexact = true;
-            steps.push(partial);
+            steps.push(Step {
+                tokens: partial,
+                extras: Extras::from_usage(&self.usage),
+                estimated: true,
+            });
         }
         steps
     }
@@ -1190,7 +1193,7 @@ impl Decoder for MessagesDecoder {
     }
 
     fn output_tokens(&self) -> i64 {
-        Tokens::sum(&self.steps).output()
+        Step::total(&self.steps).output()
     }
 
     fn extras(&self) -> Extras {
