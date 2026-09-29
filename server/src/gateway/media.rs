@@ -2,7 +2,7 @@
 //! for ChatGPT models run through the Responses image-generation tool. Each call runs in its own
 //! task, so a client that leaves does not lose the usage row.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Body;
@@ -41,6 +41,13 @@ struct Call {
     _permits: Admission,
 }
 
+impl Call {
+    /// The end of the total time of the request.
+    fn deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::from_std(self.started + TOTAL_TIMEOUT)
+    }
+}
+
 /// The usage of a finished call.
 struct Recorded {
     status: u16,
@@ -51,6 +58,17 @@ struct Recorded {
 }
 
 impl Recorded {
+    fn ok(usage_status: &'static str, tokens: Tokens, media: Media) -> Self {
+        Self {
+            status: 200,
+            error_kind: None,
+            usage_status,
+            tokens,
+            media,
+        }
+    }
+
+    /// A failure before the upstream did work: nothing was used.
     fn failed(failure: &Failure) -> Self {
         Self {
             status: failure.status.as_u16(),
@@ -60,10 +78,47 @@ impl Recorded {
             media: Media::default(),
         }
     }
+
+    /// A failure after the upstream accepted the work: the use is unknown, so the reservation
+    /// stays taken.
+    fn lost(failure: &Failure) -> Self {
+        Self {
+            usage_status: "estimated",
+            ..Self::failed(failure)
+        }
+    }
+}
+
+/// The answer and the row of a failure before the upstream did work.
+fn failed(failure: Failure) -> (Response, Option<Recorded>) {
+    let recorded = Recorded::failed(&failure);
+    (error(failure), Some(recorded))
+}
+
+/// The answer and the row of a failure after the upstream accepted the work.
+fn lost(failure: Failure) -> (Response, Option<Recorded>) {
+    let recorded = Recorded::lost(&failure);
+    (error(failure), Some(recorded))
 }
 
 fn bad(message: impl Into<String>) -> Failure {
     Failure::new(StatusCode::BAD_REQUEST, "invalid_request", message)
+}
+
+fn timed_out() -> Failure {
+    Failure::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "timeout",
+        "The request took longer than one hour.",
+    )
+}
+
+fn shutting_down() -> Failure {
+    Failure::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "shutting_down",
+        "The server is stopping.",
+    )
 }
 
 async fn record(state: &AppState, call: &Call, recorded: Recorded) {
@@ -106,36 +161,24 @@ async fn record(state: &AppState, call: &Call, recorded: Recorded) {
 }
 
 /// Runs the work in its own task. The work returns the response and its usage, or no usage
-/// when a stream records it later. A timeout or shutdown records a failed row.
+/// when a stream records it later. A timeout, a client that leaves, or a shutdown stops the
+/// work and records a row.
 async fn detached<F>(state: &AppState, call: Call, work: F) -> Response
 where
     F: Future<Output = (Response, Option<Recorded>)> + Send + 'static,
 {
-    let (tx, rx) = oneshot::channel();
+    let (mut tx, rx) = oneshot::channel();
     let task_state = state.clone();
     state.gateway_tasks.clone().spawn(async move {
         let result = tokio::select! {
-            result = tokio::time::timeout(TOTAL_TIMEOUT, work) => result.map_err(|_| {
-                Failure::new(StatusCode::GATEWAY_TIMEOUT, "timeout", "The request took longer than one hour.")
-            }),
-            () = task_state.stopping.cancelled() => Err(Failure::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "shutting_down",
-                "The server is stopping.",
-            )),
+            result = tokio::time::timeout_at(call.deadline(), work) => result.map_err(|_| timed_out()),
+            () = tx.closed() => Err(engine::client_closed()),
+            () = task_state.stopping.cancelled() => Err(shutting_down()),
         };
-        let response = match result {
-            Ok((response, recorded)) => {
-                if let Some(recorded) = recorded {
-                    record(&task_state, &call, recorded).await;
-                }
-                response
-            }
-            Err(failure) => {
-                record(&task_state, &call, Recorded::failed(&failure)).await;
-                error(failure)
-            }
-        };
+        let (response, recorded) = result.unwrap_or_else(lost);
+        if let Some(recorded) = recorded {
+            record(&task_state, &call, recorded).await;
+        }
         let _ = tx.send(response);
     });
     rx.await.unwrap_or_else(|_| {
@@ -184,22 +227,41 @@ fn reserve(state: &AppState, key: &ApiKey, tokens: i64) -> Result<i64, Failure> 
     })
 }
 
-async fn load(state: &AppState, connection_id: i64) -> Result<Connection, Failure> {
-    Connection::load(state, connection_id).await.map_err(|err| {
+/// A POST request to `<base URL>/<path>` of the connection.
+async fn upstream(state: &AppState, connection_id: i64, path: &str) -> Result<reqwest::RequestBuilder, Failure> {
+    let connection = Connection::load(state, connection_id).await.map_err(|err| {
         tracing::error!(connection = connection_id, error = %err, "cannot load the connection");
         Failure::new(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "Internal error.")
-    })
+    })?;
+    connection
+        .request(state, reqwest::Method::POST, path, None)
+        .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))
 }
 
-/// Sends the request and maps an error answer.
-async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Failure> {
-    let response = request.send().await.map_err(|err| {
-        Failure::new(
-            StatusCode::BAD_GATEWAY,
-            "upstream_unreachable",
-            format!("Cannot reach the upstream: {err}"),
-        )
-    })?;
+/// Sends the request and maps an error answer. `streamed` answers send their headers at once;
+/// the others only when the whole answer is ready.
+async fn send(request: reqwest::RequestBuilder, streamed: bool) -> Result<reqwest::Response, Failure> {
+    let limit = if streamed {
+        provider::HEADERS_TIMEOUT
+    } else {
+        TOTAL_TIMEOUT
+    };
+    let response = tokio::time::timeout(limit, request.send())
+        .await
+        .map_err(|_| {
+            Failure::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "The upstream did not answer in time.",
+            )
+        })?
+        .map_err(|err| {
+            Failure::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_unreachable",
+                format!("Cannot reach the upstream: {err}"),
+            )
+        })?;
     if !response.status().is_success() {
         return Err(provider::error_answer(response).await);
     }
@@ -215,27 +277,32 @@ fn content_type(response: &reqwest::Response) -> String {
         .to_owned()
 }
 
+fn broken(err: &reqwest::Error) -> Failure {
+    Failure::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        format!("The upstream answer broke: {err}"),
+    )
+}
+
+fn idle() -> Failure {
+    Failure::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "upstream_timeout",
+        "The upstream sent nothing for 5 minutes.",
+    )
+}
+
 /// Reads a whole answer body with the size limit and the idle timeout.
 async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
     let mut chunks = response.bytes_stream();
     let mut body = Vec::new();
     loop {
-        let chunk = tokio::time::timeout(IDLE_TIMEOUT, chunks.next()).await.map_err(|_| {
-            Failure::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream_timeout",
-                "The upstream sent nothing for 5 minutes.",
-            )
-        })?;
+        let chunk = tokio::time::timeout(IDLE_TIMEOUT, chunks.next())
+            .await
+            .map_err(|_| idle())?;
         let Some(chunk) = chunk else { break };
-        let chunk = chunk.map_err(|err| {
-            Failure::new(
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-                format!("The upstream answer broke: {err}"),
-            )
-        })?;
-        body.extend_from_slice(&chunk);
+        body.extend_from_slice(&chunk.map_err(|err| broken(&err))?);
         if body.len() > MAX_OUTPUT_BYTES {
             return Err(engine::too_large("The answer is larger than 32 MB."));
         }
@@ -243,16 +310,28 @@ async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, Failure> {
     Ok(body)
 }
 
-fn bytes_response(content_type: &str, body: Vec<u8>) -> Response {
-    let mut response = Body::from(body).into_response();
+/// Reads a whole JSON answer.
+async fn read_json(response: reqwest::Response) -> Result<Value, Failure> {
+    serde_json::from_slice(&read_body(response).await?).map_err(|_| {
+        Failure::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "The upstream answer is not JSON.",
+        )
+    })
+}
+
+fn with_content_type(mut response: Response, content_type: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(content_type) {
         response.headers_mut().insert(header::CONTENT_TYPE, value);
     }
     response
 }
 
-/// Forwards a streamed answer (SSE or binary audio) as it is. `data:` lines with a `usage`
-/// object are read on the way; the usage row is written when the stream ends.
+/// Forwards a streamed answer (SSE or binary audio) as it is. `finish` gets the last SSE event
+/// that has a `usage` object (without image data) and gives the usage row, which is written
+/// when the stream ends. A failure ends the body with an error, so the client does not take a
+/// cut answer as complete.
 fn forward(
     state: &AppState,
     call: Call,
@@ -260,47 +339,27 @@ fn forward(
     finish: impl FnOnce(Option<Value>) -> Recorded + Send + 'static,
 ) -> Response {
     let content_type = content_type(&response);
-    let task_type = content_type.clone();
+    let sse = content_type.starts_with("text/event-stream");
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
     let task_state = state.clone();
     state.gateway_tasks.clone().spawn(async move {
+        let deadline = call.deadline();
         let mut chunks = response.bytes_stream();
-        let sse = task_type.starts_with("text/event-stream");
         let mut line = Vec::new();
         let mut too_long = false;
-        let mut usage = None;
-        let mut failure = None;
-        loop {
+        let mut last = None;
+        let failure = loop {
             let next = tokio::select! {
                 next = tokio::time::timeout(IDLE_TIMEOUT, chunks.next()) => next,
-                () = tx.closed() => {
-                    failure = Some(engine::client_closed());
-                    break;
-                }
-                () = task_state.stopping.cancelled() => {
-                    failure = Some(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "shutting_down", "The server is stopping."));
-                    break;
-                }
+                () = tokio::time::sleep_until(deadline) => break Some(timed_out()),
+                () = tx.closed() => break Some(engine::client_closed()),
+                () = task_state.stopping.cancelled() => break Some(shutting_down()),
             };
             let chunk = match next {
                 Ok(Some(Ok(chunk))) => chunk,
-                Ok(None) => break,
-                Ok(Some(Err(err))) => {
-                    failure = Some(Failure::new(
-                        StatusCode::BAD_GATEWAY,
-                        "upstream_error",
-                        format!("The upstream answer broke: {err}"),
-                    ));
-                    break;
-                }
-                Err(_) => {
-                    failure = Some(Failure::new(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "upstream_timeout",
-                        "The upstream sent nothing for 5 minutes.",
-                    ));
-                    break;
-                }
+                Ok(None) => break None,
+                Ok(Some(Err(err))) => break Some(broken(&err)),
+                Err(_) => break Some(idle()),
             };
             if sse {
                 let mut pieces = chunk.split(|byte| *byte == b'\n').peekable();
@@ -317,33 +376,38 @@ fn forward(
                     }
                     if !too_long
                         && let Some(data) = line.strip_prefix(b"data: ")
-                        && let Ok(event) = serde_json::from_slice::<Value>(data)
+                        && let Ok(mut event) = serde_json::from_slice::<Value>(data)
                         && event["usage"].is_object()
                     {
-                        usage = Some(event["usage"].clone());
+                        if let Some(event) = event.as_object_mut() {
+                            event.remove("b64_json");
+                        }
+                        last = Some(event);
                     }
                     line.clear();
                     too_long = false;
                 }
             }
-            if tx.send(Ok(chunk)).await.is_err() {
-                failure = Some(engine::client_closed());
-                break;
+            tokio::select! {
+                sent = tx.send(Ok(chunk)) => if sent.is_err() {
+                    break Some(engine::client_closed());
+                },
+                () = tokio::time::sleep_until(deadline) => break Some(timed_out()),
             }
-        }
-        let mut recorded = finish(usage);
+        };
+        let mut recorded = finish(last);
         if let Some(failure) = failure {
+            if failure.code != engine::CLIENT_CLOSED {
+                let message = std::io::Error::other(failure.message.clone());
+                let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Err(message))).await;
+            }
             recorded.status = failure.status.as_u16();
             recorded.error_kind = Some(failure.code.to_owned());
         }
         record(&task_state, &call, recorded).await;
     });
     let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
-    let mut response = Body::from_stream(stream).into_response();
-    if let Ok(value) = HeaderValue::from_str(&content_type) {
-        response.headers_mut().insert(header::CONTENT_TYPE, value);
-    }
-    response
+    with_content_type(Body::from_stream(stream).into_response(), &content_type)
 }
 
 fn json_body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Failure> {
@@ -400,42 +464,26 @@ pub async fn embeddings(
     let task_state = state.clone();
     let connection_id = call.connection_id;
     detached(&state, call, async move {
-        let answer = async {
-            let connection = load(&task_state, connection_id).await?;
-            let request = connection
-                .request(&task_state, reqwest::Method::POST, "embeddings", None)
-                .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?;
-            let response = send(request.json(&body)).await?;
-            let answer: Value = serde_json::from_slice(&read_body(response).await?).map_err(|_| {
-                Failure::new(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "The upstream answer is not JSON.",
-                )
-            })?;
-            Ok::<_, Failure>(answer)
-        }
-        .await;
-        match answer {
-            Ok(answer) => {
-                let reported = answer["usage"]["prompt_tokens"].as_i64();
-                let recorded = Recorded {
-                    status: 200,
-                    error_kind: None,
-                    usage_status: if reported.is_some() { "reported" } else { "estimated" },
-                    tokens: Tokens {
-                        input_text: reported.unwrap_or(estimate),
-                        ..Tokens::default()
-                    },
-                    media: Media::default(),
-                };
-                (Json(answer).into_response(), Some(recorded))
-            }
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                (error(failure), Some(recorded))
-            }
-        }
+        let request = match upstream(&task_state, connection_id, "embeddings").await {
+            Ok(request) => request,
+            Err(failure) => return failed(failure),
+        };
+        let response = match send(request.json(&body), false).await {
+            Ok(response) => response,
+            Err(failure) => return failed(failure),
+        };
+        let answer = match read_json(response).await {
+            Ok(answer) => answer,
+            Err(failure) => return lost(failure),
+        };
+        let reported = answer["usage"]["prompt_tokens"].as_i64();
+        let tokens = Tokens {
+            input_text: reported.unwrap_or(estimate),
+            ..Tokens::default()
+        };
+        let status = if reported.is_some() { "reported" } else { "estimated" };
+        let recorded = Recorded::ok(status, tokens, Media::default());
+        (Json(answer).into_response(), Some(recorded))
     })
     .await
 }
@@ -482,53 +530,40 @@ pub async fn speech(
     let task_state = state.clone();
     let stream_call = call.clone();
     detached(&state, call, async move {
-        let response = async {
-            let connection = load(&task_state, stream_call.connection_id).await?;
-            let request = connection
-                .request(&task_state, reqwest::Method::POST, "audio/speech", None)
-                .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?;
-            send(request.json(&body)).await
-        }
-        .await;
-        match response {
-            // Binary audio has no usage; SSE ends with an event that has it.
-            Ok(response) => {
-                let finish = move |usage: Option<Value>| {
-                    let media = Media {
-                        characters,
-                        ..Media::default()
+        let request = match upstream(&task_state, stream_call.connection_id, "audio/speech").await {
+            Ok(request) => request,
+            Err(failure) => return failed(failure),
+        };
+        // Binary audio also comes in chunks, so the headers come at once.
+        let response = match send(request.json(&body), true).await {
+            Ok(response) => response,
+            Err(failure) => return failed(failure),
+        };
+        // Binary audio has no usage; SSE ends with an event that has it.
+        let finish = move |event: Option<Value>| {
+            let media = Media {
+                characters,
+                ..Media::default()
+            };
+            match event {
+                Some(event) => {
+                    let tokens = Tokens {
+                        input_text: event["usage"]["input_tokens"].as_i64().unwrap_or(0),
+                        output_audio: event["usage"]["output_tokens"].as_i64().unwrap_or(0),
+                        ..Tokens::default()
                     };
-                    match usage {
-                        Some(usage) => Recorded {
-                            status: 200,
-                            error_kind: None,
-                            usage_status: "reported",
-                            tokens: Tokens {
-                                input_text: usage["input_tokens"].as_i64().unwrap_or(0),
-                                output_audio: usage["output_tokens"].as_i64().unwrap_or(0),
-                                ..Tokens::default()
-                            },
-                            media,
-                        },
-                        None => Recorded {
-                            status: 200,
-                            error_kind: None,
-                            usage_status: "estimated",
-                            tokens: Tokens {
-                                input_text: estimate,
-                                ..Tokens::default()
-                            },
-                            media,
-                        },
-                    }
-                };
-                (forward(&task_state, stream_call, response, finish), None)
+                    Recorded::ok("reported", tokens, media)
+                }
+                None => {
+                    let tokens = Tokens {
+                        input_text: estimate,
+                        ..Tokens::default()
+                    };
+                    Recorded::ok("estimated", tokens, media)
+                }
             }
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                (error(failure), Some(recorded))
-            }
-        }
+        };
+        (forward(&task_state, stream_call, response, finish), None)
     })
     .await
 }
@@ -668,16 +703,11 @@ fn transcription_usage(usage: Option<&Value>, seconds: Option<f64>) -> Recorded 
             if seconds.is_some() { "reported" } else { "estimated" },
         ),
     };
-    Recorded {
-        status: 200,
-        error_kind: None,
-        usage_status: status,
-        tokens,
-        media: Media {
-            seconds,
-            ..Media::default()
-        },
-    }
+    let media = Media {
+        seconds,
+        ..Media::default()
+    };
+    Recorded::ok(status, tokens, media)
 }
 
 async fn audio_text(
@@ -696,14 +726,16 @@ async fn audio_text(
             .iter()
             .find(|p| p.name == "file" && p.file_name.is_some())
             .ok_or_else(|| bad("The field `file` is missing."))?;
+        let form = rebuild_form(&parts, &route.upstream_model)?;
+        // The use is known only after the answer: nothing is reserved, but a key over its
+        // budget waits.
+        reserve(&state, &key, 0)?;
         let (data, file_name) = (file.data.clone(), file.file_name.clone());
         let seconds = tokio::task::spawn_blocking(move || audio_seconds(data, file_name))
             .await
             .ok()
             .flatten();
-        let form = rebuild_form(&parts, &route.upstream_model)?;
         let streamed = text_part(&parts, "stream") == Some("true");
-        // The cost is known only after the answer, so nothing is reserved.
         let call = Call {
             key: key.clone(),
             route,
@@ -725,23 +757,16 @@ async fn audio_text(
     let task_state = state.clone();
     let stream_call = call.clone();
     detached(&state, call, async move {
-        let response = async {
-            let connection = load(&task_state, stream_call.connection_id).await?;
-            let request = connection
-                .request(&task_state, reqwest::Method::POST, path, None)
-                .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?;
-            send(request.multipart(form)).await
-        }
-        .await;
-        let response = match response {
+        let request = match upstream(&task_state, stream_call.connection_id, path).await {
+            Ok(request) => request,
+            Err(failure) => return failed(failure),
+        };
+        let response = match send(request.multipart(form), stream_call.streamed).await {
             Ok(response) => response,
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                return (error(failure), Some(recorded));
-            }
+            Err(failure) => return failed(failure),
         };
         if stream_call.streamed {
-            let finish = move |usage: Option<Value>| transcription_usage(usage.as_ref(), seconds);
+            let finish = move |event: Option<Value>| transcription_usage(event.as_ref().map(|e| &e["usage"]), seconds);
             return (forward(&task_state, stream_call, response, finish), None);
         }
         // The answer is JSON or plain text (text, srt, vtt); it goes back unchanged.
@@ -750,12 +775,12 @@ async fn audio_text(
             Ok(body) => {
                 let answer: Option<Value> = serde_json::from_slice(&body).ok();
                 let recorded = transcription_usage(answer.as_ref().map(|a| &a["usage"]), seconds);
-                (bytes_response(&content_type, body), Some(recorded))
+                (
+                    with_content_type(Body::from(body).into_response(), &content_type),
+                    Some(recorded),
+                )
             }
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                (error(failure), Some(recorded))
-            }
+            Err(failure) => lost(failure),
         }
     })
     .await
@@ -798,25 +823,20 @@ pub async fn translations(
 // ---------------------------------------------------------------------------------------------
 // Images
 
-/// The usage of an Images API answer.
-fn image_usage(answer: &Value, size: Option<&str>, quality: Option<&str>) -> Recorded {
+/// The usage of an Images API answer or of a completed stream event. Older models do not
+/// return the size and quality, so the requested values are used then.
+fn image_usage(answer: &Value, images: i64, size: Option<&str>, quality: Option<&str>) -> Recorded {
     let usage = &answer["usage"];
     let media = Media {
-        images_generated: answer["data"].as_array().map_or(0, |data| data.len() as i64),
+        images_generated: images,
         image_size: answer["size"].as_str().or(size).map(str::to_owned),
         image_quality: answer["quality"].as_str().or(quality).map(str::to_owned),
         ..Media::default()
     };
-    Recorded {
-        status: 200,
-        error_kind: None,
-        usage_status: if usage.is_object() { "reported" } else { "estimated" },
-        tokens: if usage.is_object() {
-            Tokens::from_image(usage, true)
-        } else {
-            Tokens::default()
-        },
-        media,
+    if usage.is_object() {
+        Recorded::ok("reported", Tokens::from_image(usage, true), media)
+    } else {
+        Recorded::ok("estimated", Tokens::default(), media)
     }
 }
 
@@ -832,52 +852,36 @@ async fn native_images(
     let task_state = state.clone();
     let stream_call = call.clone();
     detached(state, call, async move {
-        let response = async {
-            let connection = load(&task_state, stream_call.connection_id).await?;
-            let request = connection
-                .request(&task_state, reqwest::Method::POST, path, None)
-                .map_err(|err| Failure::new(StatusCode::BAD_GATEWAY, "upstream_blocked", err.to_string()))?;
-            let request = match body {
-                ImageBody::Json(body) => request.json(&body),
-                ImageBody::Form(form) => request.multipart(form),
-            };
-            send(request).await
-        }
-        .await;
-        let response = match response {
+        let request = match upstream(&task_state, stream_call.connection_id, path).await {
+            Ok(request) => request,
+            Err(failure) => return failed(failure),
+        };
+        let request = match body {
+            ImageBody::Json(body) => request.json(&body),
+            ImageBody::Form(form) => request.multipart(form),
+        };
+        let response = match send(request, stream_call.streamed).await {
             Ok(response) => response,
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                return (error(failure), Some(recorded));
-            }
+            Err(failure) => return failed(failure),
         };
         if stream_call.streamed {
-            let finish = move |usage: Option<Value>| {
-                let answer = json!({ "usage": usage, "data": [{}] });
-                image_usage(&answer, size.as_deref(), quality.as_deref())
+            // A stream makes one image; its `completed` event has the usage.
+            let finish = move |event: Option<Value>| {
+                let completed = event.filter(|e| e["type"].as_str().is_some_and(|t| t.ends_with(".completed")));
+                match completed {
+                    Some(event) => image_usage(&event, 1, size.as_deref(), quality.as_deref()),
+                    None => Recorded::ok("estimated", Tokens::default(), Media::default()),
+                }
             };
             return (forward(&task_state, stream_call, response, finish), None);
         }
-        match read_body(response).await {
-            Ok(body) => match serde_json::from_slice::<Value>(&body) {
-                Ok(answer) => {
-                    let recorded = image_usage(&answer, size.as_deref(), quality.as_deref());
-                    (Json(answer).into_response(), Some(recorded))
-                }
-                Err(_) => {
-                    let failure = Failure::new(
-                        StatusCode::BAD_GATEWAY,
-                        "upstream_error",
-                        "The upstream answer is not JSON.",
-                    );
-                    let recorded = Recorded::failed(&failure);
-                    (error(failure), Some(recorded))
-                }
-            },
-            Err(failure) => {
-                let recorded = Recorded::failed(&failure);
-                (error(failure), Some(recorded))
+        match read_json(response).await {
+            Ok(answer) => {
+                let images = answer["data"].as_array().map_or(0, |data| data.len() as i64);
+                let recorded = image_usage(&answer, images, size.as_deref(), quality.as_deref());
+                (Json(answer).into_response(), Some(recorded))
             }
+            Err(failure) => lost(failure),
         }
     })
     .await
@@ -1044,6 +1048,34 @@ pub async fn image_generations(
     native_images(&state, call, "images/generations", ImageBody::Json(body), size, quality).await
 }
 
+/// The Images API fields of a ChatGPT edit form, with the JSON types of the tool.
+fn chatgpt_edit_request(parts: &[Part]) -> Result<Value, Failure> {
+    let field = |name: &str| text_part(parts, name);
+    let number = |name: &str| {
+        field(name)
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| bad(format!("`{name}` must be a number.")))
+            })
+            .transpose()
+    };
+    let mut request = json!({
+        "prompt": field("prompt"),
+        "n": number("n")?,
+        "response_format": field("response_format"),
+        "stream": field("stream") == Some("true"),
+    });
+    for name in TOOL_FIELDS {
+        request[name] = if name == "output_compression" {
+            json!(number(name)?)
+        } else {
+            json!(field(name))
+        };
+    }
+    Ok(request)
+}
+
 pub async fn image_edits(
     State(state): State<AppState>,
     Extension(key): Extension<ApiKey>,
@@ -1059,12 +1091,15 @@ pub async fn image_edits(
         Ok(route) => route,
         Err(failure) => return error(failure),
     };
-    let field = |name: &str| text_part(&parts, name).map(str::to_owned);
     match route.upstream {
         Upstream::ChatGpt => {
             if parts.iter().any(|p| p.name == "mask") {
                 return error(bad("ChatGPT models do not take a `mask`."));
             }
+            let request = match chatgpt_edit_request(&parts) {
+                Ok(request) => request,
+                Err(failure) => return error(failure),
+            };
             let images: Vec<String> = parts
                 .iter()
                 .filter(|p| p.file_name.is_some() && (p.name == "image" || p.name == "image[]"))
@@ -1080,26 +1115,18 @@ pub async fn image_edits(
             if images.is_empty() {
                 return error(bad("The field `image` is missing."));
             }
-            let mut request = json!({ "prompt": field("prompt"), "n": field("n").and_then(|n| n.parse::<i64>().ok()) });
-            for name in TOOL_FIELDS {
-                if let Some(value) = field(name) {
-                    request[name] = json!(value);
-                }
-            }
-            if let Some(format) = field("response_format") {
-                request["response_format"] = json!(format);
-            }
             chatgpt_images(&state, &key, admission, &model, &request, images).await
         }
         Upstream::Connection { id, kind: Kind::OpenAi } => {
+            let form = match rebuild_form(&parts, &route.upstream_model) {
+                Ok(form) => form,
+                Err(failure) => return error(failure),
+            };
+            let field = |name: &str| text_part(&parts, name).map(str::to_owned);
             let prompt = field("prompt").unwrap_or_default();
             let estimate = crate::tokens::estimate(&json!(prompt)).await as i64 + request::DEFAULT_OUTPUT_RESERVE;
             let reserved = match reserve(&state, &key, estimate) {
                 Ok(reserved) => reserved,
-                Err(failure) => return error(failure),
-            };
-            let form = match rebuild_form(&parts, &route.upstream_model) {
-                Ok(form) => form,
                 Err(failure) => return error(failure),
             };
             let streamed = field("stream").as_deref() == Some("true");

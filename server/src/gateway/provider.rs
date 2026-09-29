@@ -20,7 +20,7 @@ use crate::connections::{Connection, Kind};
 use crate::state::AppState;
 use crate::usage::Tokens;
 
-const HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The format of the upstream endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]

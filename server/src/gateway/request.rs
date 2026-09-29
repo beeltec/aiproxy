@@ -363,7 +363,13 @@ fn reject_stored_state(body: &Value) -> Result<(), Failure> {
             stored_reference = true;
         }
     });
-    if stored_reference {
+    // The image-generation tool can take its mask as a stored file.
+    let stored_mask = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tool| !tool["input_image_mask"]["file_id"].is_null());
+    if stored_reference || stored_mask {
         return Err(bad(
             "References to stored items or files are not supported. Send the content inline.",
         ));
