@@ -103,6 +103,18 @@ pub fn encode(body: &Value, route: &Route, kind: Kind) -> Result<Value, String> 
                 let role = item["role"].as_str().unwrap_or("user");
                 match role {
                     "assistant" => {
+                        // Items of one assistant turn (for example a tool call, then text) must
+                        // be one Chat message before the tool results.
+                        if let Some(last) = messages.last_mut().filter(|m| m["role"] == "assistant") {
+                            let text = text_of(&item["content"]);
+                            let joined = match last["content"].as_str().filter(|t| !t.is_empty()) {
+                                Some(old) if !text.is_empty() => format!("{old}\n{text}"),
+                                Some(old) => old.to_owned(),
+                                None => text,
+                            };
+                            last["content"] = json!(joined);
+                            continue;
+                        }
                         let mut message = json!({ "role": "assistant", "content": text_of(&item["content"]) });
                         let refusal: String = item["content"]
                             .as_array()

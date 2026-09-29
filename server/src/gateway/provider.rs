@@ -50,7 +50,7 @@ impl Wire {
 
 /// Picks the endpoint for the model. OpenAI models can have only one of the two endpoints, and
 /// some reasoning models take function tools only on Responses. Unknown means both.
-fn choose_wire(kind: Kind, client_format: &str, capabilities: &Value, body: &Value) -> Wire {
+fn choose_wire(kind: Kind, client_format: &str, model: &str, capabilities: &Value, body: &Value) -> Wire {
     match kind {
         Kind::Anthropic => Wire::Messages,
         Kind::OpenRouter => Wire::Chat,
@@ -60,7 +60,13 @@ fn choose_wire(kind: Kind, client_format: &str, capabilities: &Value, body: &Val
             let function_tools = body["tools"]
                 .as_array()
                 .is_some_and(|tools| tools.iter().any(|t| t["type"] == "function"));
-            let chat_fits = has("chat") && !(function_tools && capabilities["chat_tools"] == false);
+            // On Chat, only the special search models can search the web.
+            let searches = body["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|t| t["type"] == "web_search"));
+            let chat_fits = has("chat")
+                && !(function_tools && capabilities["chat_tools"] == false)
+                && !(searches && !model.contains("search"));
             match client_format {
                 "chat" if chat_fits => Wire::Chat,
                 _ if has("responses") => Wire::Responses,
@@ -140,7 +146,19 @@ pub(super) async fn attempt(
         tracing::error!(connection = connection_id, error = %err, "cannot load the connection");
         Failure::new(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "Internal error.")
     })?;
-    let wire = choose_wire(kind, job.client_format, &job.route.capabilities, &job.body);
+    let wire = choose_wire(
+        kind,
+        job.client_format,
+        &job.route.upstream_model,
+        &job.route.capabilities,
+        &job.body,
+    );
+    // Chat answers do not say how many searches ran, so their cost cannot be complete.
+    outcome.searches_uncounted = wire == Wire::Chat
+        && (job.body["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|t| t["type"] == "web_search"))
+            || job.route.upstream_model.contains("search"));
     let native = wire.format() == job.client_format;
     // Translated requests always stream, so one decoder serves both client modes.
     let stream = !native || job.stream;

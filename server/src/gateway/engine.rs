@@ -133,6 +133,8 @@ pub(super) struct Outcome {
     pub web_search_calls: i64,
     /// True after an upstream accepted the request, so tokens can be used.
     pub generation_started: bool,
+    /// Web searches may have run, but the upstream does not report their number.
+    pub searches_uncounted: bool,
     /// The upstream format of a native stream: its errors go out in that format.
     pub native_wire: Option<provider::Wire>,
 }
@@ -559,6 +561,8 @@ async fn record_usage(state: &AppState, job: &Job, outcome: &Outcome, started: I
         ),
         (None, None) => (Tokens::default(), "none"),
     };
+    let mut tokens = tokens;
+    tokens.inexact |= outcome.searches_uncounted;
     // Without reported usage the real use is unknown, so keep at least the reservation.
     let used = match usage_status {
         "estimated" => (tokens.input() + tokens.output()).max(job.reserved_tokens),
