@@ -1,0 +1,85 @@
+# aiproxy behind Traefik. Copy this folder to the server, then:
+#   openssl rand -base64 32 > master.key && chmod 600 master.key
+#   echo "AIPROXY_HOST=ai.example.com" > .env && echo "ACME_EMAIL=you@example.com" >> .env
+#   docker compose up -d
+#   docker compose exec aiproxy aiproxy setup-token
+# With a Traefik that already runs, remove the traefik service and attach that Traefik to the
+# proxy network with the fixed address below.
+
+name: aiproxy
+
+services:
+  aiproxy:
+    image: ghcr.io/beeltec/aiproxy:main
+    restart: unless-stopped
+    environment:
+      AIPROXY_PUBLIC_URL: https://${AIPROXY_HOST:?set AIPROXY_HOST in .env}
+      AIPROXY_MASTER_KEY_FILE: /run/secrets/master_key
+      # Only Traefik may set X-Forwarded-For.
+      AIPROXY_TRUSTED_PROXIES: 172.30.0.2
+    secrets:
+      # A copy that only the user of the image (nonroot, 65532) can read.
+      - source: master_key
+        uid: "65532"
+        gid: "65532"
+        mode: 0400
+    volumes:
+      - data:/data
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/aiproxy", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Running requests get 30 seconds to end and record their usage.
+    stop_grace_period: 45s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: aiproxy_proxy
+      traefik.http.routers.aiproxy.rule: Host(`${AIPROXY_HOST}`)
+      traefik.http.routers.aiproxy.entrypoints: websecure
+      traefik.http.routers.aiproxy.tls.certresolver: letsencrypt
+      traefik.http.services.aiproxy.loadbalancer.server.port: "8080"
+
+  traefik:
+    image: traefik:v3
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.websecure.address=:443
+      # Uploads (images, audio) get as long as the gateway gives them.
+      - --entrypoints.websecure.transport.respondingtimeouts.readtimeout=120s
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      proxy:
+        ipv4_address: 172.30.0.2
+
+networks:
+  # Only Traefik and aiproxy are on this network, so the fixed address is Traefik. Other
+  # containers get addresses from the upper half, so none can take the address of Traefik.
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+
+volumes:
+  data:
+  letsencrypt:
+
+secrets:
+  master_key:
+    file: ./master.key

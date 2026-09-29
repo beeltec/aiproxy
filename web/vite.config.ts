@@ -9,6 +9,9 @@ export default defineConfig({
 	resolve: { tsconfigPaths: true },
 	// Inlined assets would become data: URLs, which the CSP blocks.
 	build: { assetsInlineLimit: 0 },
+	// The prerender fetches the page from the preview server on 127.0.0.1; `localhost` can
+	// be IPv6 only (for example in a container).
+	preview: { host: "127.0.0.1" },
 	server: {
 		proxy: {
 			"/admin/api": apiTarget,
