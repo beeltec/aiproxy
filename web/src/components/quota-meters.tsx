@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Schemas } from "#/lib/api/client";
 import { formatDateTime, formatRelative } from "#/lib/format";
 
@@ -21,16 +21,13 @@ function useTick(ms: number) {
 	}, [ms]);
 }
 
-/** The usage limits of the account, as meters. The tick shows the failover threshold. The
- * action shows at the end of the "Updated" line, also when there is no data. */
+/** The usage limits of the account, as meters. The tick shows the failover threshold. */
 export function QuotaMeters({
 	account,
 	threshold,
-	action,
 }: {
 	account: Account;
 	threshold: number | null;
-	action?: ReactNode;
 }) {
 	useTick(30_000);
 	const windows = [
@@ -49,10 +46,9 @@ export function QuotaMeters({
 	);
 	if (windows.length === 0) {
 		return (
-			<div className="flex items-center gap-1.5 border-t px-4 py-2 text-xs text-muted-foreground">
-				<p>Usage limits show up after the next usage poll or request.</p>
-				{action}
-			</div>
+			<p className="border-t px-4 py-2 text-xs text-muted-foreground">
+				Usage limits show up after the next usage poll or request.
+			</p>
 		);
 	}
 	const updated = account.quota_updated_at;
@@ -96,15 +92,13 @@ export function QuotaMeters({
 					);
 				})}
 			</div>
-			{(updated || action) && (
-				<div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-					{updated && (
-						<span title={formatDateTime(updated)}>
-							Updated {formatRelative(updated)}
-						</span>
-					)}
-					{action}
-				</div>
+			{updated && (
+				<p
+					className="text-xs text-muted-foreground"
+					title={formatDateTime(updated)}
+				>
+					Updated {formatRelative(updated)}
+				</p>
 			)}
 		</div>
 	);

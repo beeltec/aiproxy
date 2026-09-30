@@ -183,42 +183,14 @@ function AccountCard({
 				}),
 			),
 		onSuccess: () => {
-			toast.success("The token is renewed.");
+			toast.success("The token, models and usage are refreshed.");
 			void refresh();
+			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
 		onError: (error) => {
 			toast.error(errorMessage(error));
 			void refresh();
 		},
-	});
-	const syncModels = useMutation({
-		mutationFn: () =>
-			call(
-				api.POST("/chatgpt/accounts/{id}/models/sync", {
-					params: { path: { id: account.id } },
-				}),
-			),
-		onSuccess: (updated) => {
-			toast.success(
-				`The models are refreshed. ${updated.models} models found.`,
-			);
-		},
-		onError: (error) => toast.error(errorMessage(error)),
-		onSettled: () => {
-			void refresh();
-			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
-		},
-	});
-	const refreshUsage = useMutation({
-		mutationFn: () =>
-			call(
-				api.POST("/chatgpt/accounts/{id}/usage/refresh", {
-					params: { path: { id: account.id } },
-				}),
-			),
-		onSuccess: () => toast.success("The usage is refreshed."),
-		onError: (error) => toast.error(errorMessage(error)),
-		onSettled: () => void refresh(),
 	});
 	const makePrimary = useMutation({
 		mutationFn: () =>
@@ -370,19 +342,6 @@ function AccountCard({
 								? formatRelative(account.models_last_sync_at)
 								: "not refreshed"}
 						</span>
-						<Button
-							size="icon-xs"
-							variant="ghost"
-							className="-my-1 shrink-0"
-							aria-label="Refresh models"
-							title="Refresh models"
-							disabled={broken || syncModels.isPending}
-							onClick={() => syncModels.mutate()}
-						>
-							<RefreshCwIcon
-								className={syncModels.isPending ? "animate-spin" : undefined}
-							/>
-						</Button>
 					</dd>
 				</div>
 				{account.credits_unlimited ? (
@@ -398,25 +357,7 @@ function AccountCard({
 					)
 				)}
 			</dl>
-			<QuotaMeters
-				account={account}
-				threshold={failover ? threshold : null}
-				action={
-					<Button
-						size="icon-xs"
-						variant="ghost"
-						className="-my-1 shrink-0"
-						aria-label="Refresh usage"
-						title="Refresh usage"
-						disabled={broken || refreshUsage.isPending}
-						onClick={() => refreshUsage.mutate()}
-					>
-						<RefreshCwIcon
-							className={refreshUsage.isPending ? "animate-spin" : undefined}
-						/>
-					</Button>
-				}
-			/>
+			<QuotaMeters account={account} threshold={failover ? threshold : null} />
 			{account.last_refresh_error && account.last_refresh_failed_at && (
 				<p className="border-t px-4 py-2 text-xs text-destructive">
 					Refresh failed {formatRelative(account.last_refresh_failed_at)}:{" "}
