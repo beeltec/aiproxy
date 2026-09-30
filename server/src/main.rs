@@ -77,7 +77,7 @@ async fn serve() -> anyhow::Result<()> {
     let rejected_db = state.db.clone();
     tokio::spawn(async move { rejected.run(rejected_db).await });
     tokio::spawn(chatgpt::scheduler::run(state.clone()));
-    // Start the first Codex version lookup now, before the first backend request.
+    // Starts the first Codex version lookup in the background.
     chatgpt::codex_version::current(&state);
     state.prices.reload(&state.db).await?;
     tokio::spawn(prices::sync::run(state.clone()));
