@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
-- aiproxy now sends the current Codex CLI version to the ChatGPT backend, in the `client_version` of the model list request and in the `User-Agent` of all backend requests. The backend hides models that need a newer client, so new models did not show. aiproxy reads the latest version from the npm registry at start and then once a day. When npm is not available, it uses the last known version, else a built-in version (`0.159.2`). ([#25](https://github.com/beeltec/aiproxy/issues/25))
+- aiproxy now sends the current Codex CLI version to the ChatGPT backend, in the `client_version` of the model list request and in the `User-Agent` of all backend requests. The backend hides models that need a newer client, so new models did not show. aiproxy reads the latest version from the npm registry at start and then again when it is older than a day. When npm is not available, it uses the last known version, else a built-in version (`0.159.2`). ([#26](https://github.com/beeltec/aiproxy/pull/26))
 
 ## [0.1.1] - 2026-09-30
 
