@@ -182,14 +182,9 @@ function AccountCard({
 					params: { path: { id: account.id } },
 				}),
 			),
-		onSuccess: (updated) => {
-			// The endpoint ignores the errors of the model sync and the usage poll.
-			const usageAt = updated.quota_updated_at;
-			const usageFailed =
-				usageAt === null ||
-				usageAt === undefined ||
-				usageAt < updated.last_refresh_at;
-			const modelsFailed = Boolean(updated.models_last_error);
+		onSuccess: ({ models_refreshed, usage_refreshed }) => {
+			const usageFailed = !usage_refreshed;
+			const modelsFailed = !models_refreshed;
 			if (usageFailed && modelsFailed) {
 				toast.warning(
 					"The token is refreshed, but the models and the usage could not be refreshed.",

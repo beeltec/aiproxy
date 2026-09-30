@@ -1422,6 +1422,13 @@ export interface components {
 		RecoveryCodes: {
 			recovery_codes: string[];
 		};
+		RefreshOutcome: {
+			account: components["schemas"]["AccountView"];
+			/** @description The model list sync worked. */
+			models_refreshed: boolean;
+			/** @description The usage poll worked. A poll that the upstream cooldown stopped did not work. */
+			usage_refreshed: boolean;
+		};
 		/** @description A scheduled job (token refresh, price sync). */
 		RefreshSchedule: {
 			/** @description 5-field cron: minute hour day-of-month month day-of-week. */
@@ -2821,7 +2828,7 @@ export interface operations {
 					[name: string]: unknown;
 				};
 				content: {
-					"application/json": components["schemas"]["AccountView"];
+					"application/json": components["schemas"]["RefreshOutcome"];
 				};
 			};
 			/** @description The token refresh failed */

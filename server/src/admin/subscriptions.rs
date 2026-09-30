@@ -221,23 +221,36 @@ async fn set_failover_order(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct RefreshOutcome {
+    account: AccountView,
+    /// The model list sync worked.
+    models_refreshed: bool,
+    /// The usage poll worked. A poll that the upstream cooldown stopped did not work.
+    usage_refreshed: bool,
+}
+
 /// Refreshes the token of the account. Then loads its model list and its usage. Only a failed
 /// token refresh fails the request.
 #[utoipa::path(post, path = "/chatgpt/accounts/{id}/refresh", tag = "subscriptions", responses(
-    (status = OK, body = AccountView),
+    (status = OK, body = RefreshOutcome),
     (status = BAD_GATEWAY, body = ErrorBody, description = "The token refresh failed"),
 ))]
 async fn refresh_now(
     _: AdminSession,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> ApiResult<Json<AccountView>> {
+) -> ApiResult<Json<RefreshOutcome>> {
     load_account(&state, id).await?;
     match refresh::refresh(&state, id, Trigger::Manual).await {
         Ok(()) => {
             // The model sync and the usage poll log their errors. The model sync also stores its error.
-            let _ = tokio::join!(models::sync_account(&state, id, true), usage::refresh(&state, id));
-            Ok(Json(load_account(&state, id).await?))
+            let (models, usage) = tokio::join!(models::sync_account(&state, id, true), usage::refresh(&state, id));
+            Ok(Json(RefreshOutcome {
+                account: load_account(&state, id).await?,
+                models_refreshed: models.is_ok(),
+                usage_refreshed: usage.is_ok(),
+            }))
         }
         Err(err @ (Failure::NeedsRelogin(_) | Failure::Temporary(_))) => Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
