@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
 
-use crate::chatgpt::{accounts, backend};
+use crate::chatgpt::{accounts, backend, codex_version};
 use crate::state::AppState;
 
 /// Fields that the backend accepts. It answers other fields with 400.
@@ -146,7 +146,8 @@ pub async fn send(state: &AppState, account: i64, body: &Value) -> Result<reqwes
         .header("session-id", body["prompt_cache_key"].as_str().unwrap_or_default())
         .header("x-codex-routing-hint", routing_hint(body))
         .json(body);
-    let send = backend::with_headers(request, &credentials, &installation_id).send();
+    let client_version = codex_version::current(state);
+    let send = backend::with_headers(request, &credentials, &installation_id, &client_version).send();
     let response = tokio::time::timeout(HEADERS_TIMEOUT, send)
         .await
         .map_err(|_| SendError::Failed {

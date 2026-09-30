@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{accounts, backend};
+use super::{accounts, backend, codex_version};
 use crate::db::now;
 use crate::state::AppState;
 
@@ -39,13 +39,14 @@ struct ModelInfo {
 pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usize> {
     let credentials = accounts::credentials(state, account).await?;
     let installation_id = backend::installation_id(&state.db).await?;
+    let client_version = codex_version::get(state, false).await;
     let request = state
         .http
         .get(format!("{}/models", backend::BASE_URL))
-        .query(&[("client_version", backend::CLIENT_VERSION)])
+        .query(&[("client_version", &client_version)])
         .header("Accept", "application/json")
         .timeout(TIMEOUT);
-    let response = backend::with_headers(request, &credentials, &installation_id)
+    let response = backend::with_headers(request, &credentials, &installation_id, &client_version)
         .send()
         .await?;
     let status = response.status();

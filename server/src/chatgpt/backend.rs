@@ -7,16 +7,19 @@ use super::accounts::Credentials;
 use super::oauth::ORIGINATOR;
 
 pub const BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-/// Codex CLI version that the backend expects in `client_version`.
-pub const CLIENT_VERSION: &str = "0.158.0";
 
-/// Adds the headers that every backend request needs.
-pub fn with_headers(request: RequestBuilder, credentials: &Credentials, installation_id: &str) -> RequestBuilder {
+/// Adds the headers that every backend request needs. `client_version` is the Codex CLI version.
+pub fn with_headers(
+    request: RequestBuilder,
+    credentials: &Credentials,
+    installation_id: &str,
+    client_version: &str,
+) -> RequestBuilder {
     request
         .bearer_auth(&credentials.access_token)
         .header("ChatGPT-Account-ID", &credentials.chatgpt_account_id)
         .header("originator", ORIGINATOR)
-        .header("User-Agent", format!("{ORIGINATOR}/{CLIENT_VERSION} (aiproxy)"))
+        .header("User-Agent", format!("{ORIGINATOR}/{client_version} (aiproxy)"))
         .header("x-codex-installation-id", installation_id)
 }
 

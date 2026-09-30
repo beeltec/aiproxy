@@ -10,6 +10,7 @@ use webauthn_rs::{Webauthn, WebauthnBuilder};
 use tokio::sync::Notify;
 
 use crate::admin::Ceremonies;
+use crate::chatgpt::codex_version::CodexVersionCache;
 use crate::chatgpt::link::LinkFlows;
 use crate::chatgpt::refresh::Refresher;
 use crate::client_ip::TrustedProxies;
@@ -39,6 +40,7 @@ pub struct AppState {
     /// HTTP client for connection base URLs, with the outbound address policy.
     pub upstream_http: reqwest::Client,
     pub catalog: Arc<CatalogCache>,
+    pub codex_version: Arc<CodexVersionCache>,
     pub thinking_cache: Arc<ThinkingCache>,
     pub item_cache: Arc<ItemCache>,
     pub refresher: Arc<Refresher>,
@@ -83,6 +85,7 @@ impl AppState {
                 .build()?,
             upstream_http: crate::outbound::client(config.allow_private_upstreams)?,
             catalog: Arc::default(),
+            codex_version: Arc::default(),
             thinking_cache: Arc::default(),
             item_cache: Arc::default(),
             refresher: Arc::default(),
