@@ -311,14 +311,10 @@ async fn poll(state: &AppState, account: i64, times: &mut PollTimes) -> Result<(
     if !status.is_success() {
         tracing::warn!(account, status = status.as_u16(), "the usage request failed");
         if status.as_u16() == 429 {
-            let cooldown = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map_or(DEFAULT_COOLDOWN, |seconds| {
-                    Duration::from_secs(seconds).min(MAX_COOLDOWN)
-                });
+            let retry_after = response.headers().get("retry-after").and_then(|v| v.to_str().ok());
+            let cooldown = retry_after.and_then(retry_seconds).map_or(DEFAULT_COOLDOWN, |seconds| {
+                Duration::from_secs(seconds).min(MAX_COOLDOWN)
+            });
             times.not_before = Some(Instant::now() + cooldown);
             return Err(UsageError::Throttled);
         }
@@ -334,6 +330,15 @@ async fn poll(state: &AppState, account: i64, times: &mut PollTimes) -> Result<(
     save(state, account, before, &usage).await.map_err(db_error)?;
     tracing::info!(account, "ChatGPT usage loaded");
     Ok(())
+}
+
+/// The seconds to wait from a `Retry-After` value: a number of seconds or an HTTP date.
+/// A date that is not in the future gives `None`.
+fn retry_seconds(value: &str) -> Option<u64> {
+    value.parse().ok().or_else(|| {
+        let at = chrono::DateTime::parse_from_rfc2822(value).ok()?.timestamp();
+        u64::try_from(at - now()).ok().filter(|seconds| *seconds > 0)
+    })
 }
 
 /// Data that changed during the poll is newer than the poll result: the matching part is not
