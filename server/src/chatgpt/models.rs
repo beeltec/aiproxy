@@ -13,6 +13,7 @@ use crate::gateway::codex::{self, SendError};
 use crate::state::AppState;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ERROR_CHARS: usize = 300;
 
 #[derive(Deserialize)]
 struct ModelsResponse {
@@ -37,11 +38,30 @@ struct ModelInfo {
     context_window: Option<i64>,
 }
 
-/// Loads the model list of an account and stores which models it can use. New models are
-/// enabled only when this is the first ChatGPT model list; later ones wait for the admin.
-pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usize> {
+/// A model that was never seen before is enabled when the backend lists it. Known models keep
+/// their `enabled` value.
+pub async fn sync_account(state: &AppState, account: i64, force_version: bool) -> anyhow::Result<usize> {
+    // One sync at a time, so an older list cannot replace a newer one.
+    let _running = state.model_sync.lock().await;
+    let result = async {
+        let list = fetch(state, account, force_version).await?;
+        save(state, account, &list).await
+    }
+    .await;
+    if let Err(err) = &result {
+        let error: String = format!("{err:#}").chars().take(MAX_ERROR_CHARS).collect();
+        sqlx::query("UPDATE chatgpt_accounts SET models_last_error = ? WHERE id = ?")
+            .bind(error)
+            .bind(account)
+            .execute(&state.db)
+            .await?;
+    }
+    result
+}
+
+async fn fetch(state: &AppState, account: i64, force_version: bool) -> anyhow::Result<ModelsResponse> {
     let installation_id = backend::installation_id(&state.db).await?;
-    let client_version = codex_version::get(state, false).await;
+    let client_version = codex_version::get(state, force_version).await;
     let sent = refresh::send_with_fresh_token(state, account, || {
         request(state, account, &installation_id, &client_version)
     });
@@ -56,17 +76,16 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
             bail!("the model list request failed with {status}: {message}")
         }
     };
-    let list: ModelsResponse = response.json().await?;
+    Ok(response.json().await?)
+}
 
+async fn save(state: &AppState, account: i64, list: &ModelsResponse) -> anyhow::Result<usize> {
     let now = now();
     // The delete comes first: it takes the write lock before any read in this transaction.
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM chatgpt_account_models WHERE account_id = ?")
         .bind(account)
         .execute(&mut *tx)
-        .await?;
-    let first_list: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM models WHERE source = 'chatgpt')")
-        .fetch_one(&mut *tx)
         .await?;
     for model in &list.models {
         let efforts: Vec<&str> = model
@@ -98,7 +117,7 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
         )
         .bind(&model.slug)
         .bind(&model.display_name)
-        .bind(first_list && listed)
+        .bind(listed)
         .bind(capabilities.to_string())
         .bind(now)
         .fetch_one(&mut *tx)
@@ -110,12 +129,16 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
             .execute(&mut *tx)
             .await?;
     }
+    sqlx::query("UPDATE chatgpt_accounts SET models_last_sync_at = ?, models_last_error = NULL WHERE id = ?")
+        .bind(now)
+        .bind(account)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     tracing::info!(account, models = list.models.len(), "ChatGPT model list loaded");
     Ok(list.models.len())
 }
 
-/// One model list request with the current credentials.
 async fn request(
     state: &AppState,
     account: i64,

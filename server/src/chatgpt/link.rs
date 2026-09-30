@@ -237,7 +237,7 @@ async fn finish(state: &AppState, flow: &str, tokens: &oauth::TokenSet) -> FlowS
     };
     match accounts::store_link(state, tokens, session).await {
         Ok(account) => {
-            if let Err(err) = models::sync_account(state, account).await {
+            if let Err(err) = models::sync_account(state, account, false).await {
                 tracing::warn!(account, error = %err, "cannot load the model list");
             }
             state.schedule_changed.notify_one();

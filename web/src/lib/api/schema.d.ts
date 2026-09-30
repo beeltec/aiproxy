@@ -509,6 +509,22 @@ export interface paths {
 		patch: operations["update_account"];
 		trace?: never;
 	};
+	"/chatgpt/accounts/{id}/models/sync": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		post: operations["sync_models"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/chatgpt/accounts/{id}/primary": {
 		parameters: {
 			query?: never;
@@ -916,6 +932,12 @@ export interface components {
 			limited_until?: number | null;
 			/** Format: int64 */
 			models: number;
+			models_last_error?: string | null;
+			/**
+			 * Format: int64
+			 * @description Time of the last good model list sync.
+			 */
+			models_last_sync_at?: number | null;
 			/**
 			 * Format: int64
 			 * @description Next scheduled refresh, computed from the plan.
@@ -2679,6 +2701,53 @@ export interface operations {
 				};
 			};
 			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	sync_models: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AccountView"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			/** @description The account must be linked again */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			/** @description The model list sync failed */
+			502: {
 				headers: {
 					[name: string]: unknown;
 				};

@@ -52,6 +52,7 @@ pub struct AppState {
     pub prices: PriceCache,
     /// Only one price sync runs at a time.
     pub price_sync: Arc<tokio::sync::Mutex<()>>,
+    pub model_sync: Arc<tokio::sync::Mutex<()>>,
     /// Wakes the price sync scheduler after a settings change.
     pub price_schedule_changed: Arc<Notify>,
     pub recompute: Arc<Recompute>,
@@ -94,6 +95,7 @@ impl AppState {
             usage: UsageWriter::start(db.clone(), prices.clone()),
             prices,
             price_sync: Arc::default(),
+            model_sync: Arc::default(),
             price_schedule_changed: Arc::default(),
             recompute: Arc::default(),
             gateway_tasks: TaskTracker::new(),
