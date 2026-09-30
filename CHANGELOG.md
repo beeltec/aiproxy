@@ -8,10 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- Each subscription card has a "Refresh models" button that loads the current model list from ChatGPT. The card shows the time of the last model sync and the last error. ([#28](https://github.com/beeltec/aiproxy/pull/28))
+- aiproxy loads the current model list of each subscription from ChatGPT. The subscription card shows the time of the last model sync and the last error. ([#28](https://github.com/beeltec/aiproxy/pull/28))
 - The price sync schedule is now "Price and model sync". It also refreshes the model lists of connections and active subscriptions. New ChatGPT models that upstream lists as visible are enabled automatically. Models that you turned on or off keep their state. ([#28](https://github.com/beeltec/aiproxy/pull/28))
 - aiproxy reads the usage limits, the plan and the credits of each ChatGPT subscription from ChatGPT at a set interval, and more often when an account is near its limit. The poll blocks an account when it reaches its limit, and unblocks it when the usage is below the limit again. Set the interval (1 to 60 minutes) or turn the poll off in Settings under "Usage polling". ([#PR](https://github.com/beeltec/aiproxy/pull/PR))
-- The usage meters show when the usage was last updated. Each subscription card has a "Refresh usage" button and shows the credits of the account. ([#PR](https://github.com/beeltec/aiproxy/pull/PR))
+- The usage meters show when the usage was last updated. Each subscription card shows the credits of the account. "Refresh now" on the card refreshes the token, the model list and the usage at once. ([#PR](https://github.com/beeltec/aiproxy/pull/PR))
 
 ### Fixed
 
