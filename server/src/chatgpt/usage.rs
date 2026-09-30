@@ -193,7 +193,6 @@ struct PollRow {
     limited_until: Option<i64>,
     primary_used_percent: Option<f64>,
     secondary_used_percent: Option<f64>,
-    quota_updated_at: Option<i64>,
 }
 
 /// Runs until the process stops. `state.usage_poll_changed` wakes it after a settings change.
@@ -218,7 +217,7 @@ async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     }
     let rows: Vec<PollRow> = sqlx::query_as(
         "SELECT a.id, a.status, a.access_expires_at, a.limited_until,
-             q.primary_used_percent, q.secondary_used_percent, q.updated_at AS quota_updated_at
+             q.primary_used_percent, q.secondary_used_percent
          FROM chatgpt_accounts a LEFT JOIN chatgpt_quota q ON q.account_id = a.id",
     )
     .fetch_all(&state.db)
@@ -238,11 +237,7 @@ async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
             .flatten()
             .reduce(f64::max);
         let interval = interval(base, used, row.limited_until.is_some_and(|until| until > now));
-        // A time in the future (the clock went back) counts as old.
-        let fresh = row
-            .quota_updated_at
-            .is_some_and(|at| at <= now && ((now - at) as u64) < interval.as_secs());
-        (!fresh).then_some(poll_if_due(state, row.id, interval))
+        Some(poll_if_due(state, row.id, interval))
     });
     futures_util::future::join_all(due).await;
     Ok(())
