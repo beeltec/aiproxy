@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-30
+
 ### Added
 
 - aiproxy loads the current model list of each subscription from ChatGPT. The subscription card shows the time of the last model sync and the last error. ([#28](https://github.com/beeltec/aiproxy/pull/28))
@@ -38,6 +40,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Admin login with passwords, authenticator apps (TOTP), passkeys and recovery codes.
 - Docker image for `linux/amd64` and `linux/arm64`, signed with Sigstore, and a compose setup with Traefik.
 
-[Unreleased]: https://github.com/beeltec/aiproxy/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/beeltec/aiproxy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/beeltec/aiproxy/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/beeltec/aiproxy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/beeltec/aiproxy/releases/tag/v0.1.0
