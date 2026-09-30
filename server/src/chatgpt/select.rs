@@ -96,6 +96,20 @@ pub async fn accounts_for(state: &AppState, model_id: i64) -> Result<Selection, 
     })
 }
 
+/// The usage-limit windows of an account (usually a 5-hour and a weekly window).
+#[derive(Default)]
+pub struct Quota {
+    pub primary: Window,
+    pub secondary: Window,
+}
+
+#[derive(Default)]
+pub struct Window {
+    pub used_percent: Option<f64>,
+    pub window_minutes: Option<i64>,
+    pub reset_at: Option<i64>,
+}
+
 /// Stores the usage-limit headers of a backend answer.
 pub async fn store_quota(state: &AppState, account: i64, headers: &reqwest::header::HeaderMap) {
     let number = |name: &str| {
@@ -106,17 +120,33 @@ pub async fn store_quota(state: &AppState, account: i64, headers: &reqwest::head
     };
     let now = now();
     // Two header forms are in use: an absolute reset time, or seconds until the reset.
-    let reset = |window: &str| {
-        number(&format!("x-codex-{window}-reset-at"))
+    let window = |window: &str| Window {
+        used_percent: number(&format!("x-codex-{window}-used-percent")),
+        window_minutes: number(&format!("x-codex-{window}-window-minutes")).map(|m| m as i64),
+        reset_at: number(&format!("x-codex-{window}-reset-at"))
             .map(|at| at as i64)
-            .or_else(|| number(&format!("x-codex-{window}-reset-after-seconds")).map(|s| now + s as i64))
+            .or_else(|| number(&format!("x-codex-{window}-reset-after-seconds")).map(|s| now + s as i64)),
     };
-    let primary = number("x-codex-primary-used-percent");
-    let secondary = number("x-codex-secondary-used-percent");
-    if primary.is_none() && secondary.is_none() {
+    let quota = Quota {
+        primary: window("primary"),
+        secondary: window("secondary"),
+    };
+    if quota.primary.used_percent.is_none() && quota.secondary.used_percent.is_none() {
         return;
     }
-    let result = sqlx::query(
+    if let Err(err) = write_quota(&state.db, account, &quota, now).await {
+        tracing::warn!(account, error = %err, "cannot store the usage limits");
+    }
+}
+
+/// Replaces the stored windows of the account and increases the quota revision.
+pub async fn write_quota(
+    db: impl sqlx::SqliteExecutor<'_>,
+    account: i64,
+    quota: &Quota,
+    now: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         "INSERT INTO chatgpt_quota (account_id, primary_used_percent, primary_window_minutes, primary_reset_at,
              secondary_used_percent, secondary_window_minutes, secondary_reset_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -124,21 +154,20 @@ pub async fn store_quota(state: &AppState, account: i64, headers: &reqwest::head
              primary_window_minutes = excluded.primary_window_minutes, primary_reset_at = excluded.primary_reset_at,
              secondary_used_percent = excluded.secondary_used_percent,
              secondary_window_minutes = excluded.secondary_window_minutes,
-             secondary_reset_at = excluded.secondary_reset_at, updated_at = excluded.updated_at",
+             secondary_reset_at = excluded.secondary_reset_at, updated_at = excluded.updated_at,
+             revision = chatgpt_quota.revision + 1",
     )
     .bind(account)
-    .bind(primary)
-    .bind(number("x-codex-primary-window-minutes").map(|m| m as i64))
-    .bind(reset("primary"))
-    .bind(secondary)
-    .bind(number("x-codex-secondary-window-minutes").map(|m| m as i64))
-    .bind(reset("secondary"))
+    .bind(quota.primary.used_percent)
+    .bind(quota.primary.window_minutes)
+    .bind(quota.primary.reset_at)
+    .bind(quota.secondary.used_percent)
+    .bind(quota.secondary.window_minutes)
+    .bind(quota.secondary.reset_at)
     .bind(now)
-    .execute(&state.db)
-    .await;
-    if let Err(err) = result {
-        tracing::warn!(account, error = %err, "cannot store the usage limits");
-    }
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Used percent and reset time of the primary and the secondary window.
@@ -171,13 +200,23 @@ pub async fn mark_limited(state: &AppState, account: i64, until: Option<i64>) ->
                 .unwrap_or(now + 3600)
         }
     };
-    let result = sqlx::query("UPDATE chatgpt_accounts SET limited_until = ? WHERE id = ?")
-        .bind(until)
-        .bind(account)
-        .execute(&state.db)
-        .await;
-    if let Err(err) = result {
+    if let Err(err) = write_block(&state.db, account, Some(until)).await {
         tracing::warn!(account, error = %err, "cannot store the usage-limit block");
     }
     until
+}
+
+/// Sets the end of the usage-limit block (`None` removes the block) and increases the block
+/// revision.
+pub async fn write_block(
+    db: impl sqlx::SqliteExecutor<'_>,
+    account: i64,
+    until: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE chatgpt_accounts SET limited_until = ?, limited_revision = limited_revision + 1 WHERE id = ?")
+        .bind(until)
+        .bind(account)
+        .execute(db)
+        .await?;
+    Ok(())
 }
