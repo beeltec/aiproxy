@@ -67,7 +67,7 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 			{save.error && <FieldError>{save.error.message}</FieldError>}
 			<Section
 				title="Time zone"
-				description="Refresh and price sync plans run in this time zone."
+				description="Token refresh and sync plans run in this time zone."
 			>
 				<Field>
 					<FieldLabel htmlFor="time-zone">Time zone</FieldLabel>
@@ -121,13 +121,13 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 				</FieldGroup>
 			</Section>
 			<Section
-				title="Price sync"
-				description="The gateway loads the public price lists of LiteLLM, models.dev and OpenRouter on this plan. Costs of new requests use the new prices."
+				title="Price and model sync"
+				description="The gateway loads the public price lists of LiteLLM, models.dev and OpenRouter on this plan. It also refreshes the model lists of the connections and the active subscriptions. Costs of new requests use the new prices."
 			>
 				<FieldGroup>
 					<SwitchField
 						id="price-sync-enabled"
-						label="Load prices on a plan"
+						label="Sync on a plan"
 						checked={value.price_sync.enabled}
 						onChange={(enabled) =>
 							setValue({
@@ -152,7 +152,8 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 						/>
 					</div>
 					<p className="max-w-prose text-sm text-muted-foreground">
-						You can also load the lists now on the Pricing page.
+						You can also load the prices now on the Pricing page, and refresh
+						the model lists on the Connections and Subscriptions pages.
 					</p>
 				</FieldGroup>
 			</Section>
