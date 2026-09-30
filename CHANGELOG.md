@@ -8,8 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- Each subscription card has a "Refresh models" button that loads the current model list from ChatGPT. The card shows the time of the last model sync and the last error. ([#27](https://github.com/beeltec/aiproxy/issues/27))
-- The price sync schedule is now "Price and model sync". It also refreshes the model lists of connections and active subscriptions. New ChatGPT models that upstream lists as visible are enabled automatically. Models that you turned on or off keep their state. ([#27](https://github.com/beeltec/aiproxy/issues/27))
+- Each subscription card has a "Refresh models" button that loads the current model list from ChatGPT. The card shows the time of the last model sync and the last error. ([#28](https://github.com/beeltec/aiproxy/pull/28))
+- The price sync schedule is now "Price and model sync". It also refreshes the model lists of connections and active subscriptions. New ChatGPT models that upstream lists as visible are enabled automatically. Models that you turned on or off keep their state. ([#28](https://github.com/beeltec/aiproxy/pull/28))
 
 ### Fixed
 
