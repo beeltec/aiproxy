@@ -18,6 +18,18 @@ pub struct Settings {
     #[serde(default = "default_price_sync")]
     #[schema(required = true)]
     pub price_sync: RefreshSchedule,
+    /// The regular poll of the ChatGPT account usage.
+    /// Settings saved before the usage poll existed have none.
+    #[serde(default = "default_usage_poll")]
+    #[schema(required = true)]
+    pub usage_poll: UsagePoll,
+}
+
+fn default_usage_poll() -> UsagePoll {
+    UsagePoll {
+        enabled: true,
+        minutes: 5,
+    }
 }
 
 fn default_price_sync() -> RefreshSchedule {
@@ -42,6 +54,13 @@ pub struct Failover {
     pub threshold_percent: u8,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct UsagePoll {
+    pub enabled: bool,
+    /// Poll each account at this interval, 1 to 60 minutes. The poll is faster near the usage limit.
+    pub minutes: u8,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -55,6 +74,7 @@ impl Default for Settings {
                 threshold_percent: 95,
             },
             price_sync: default_price_sync(),
+            usage_poll: default_usage_poll(),
         }
     }
 }
@@ -90,6 +110,9 @@ impl Settings {
         parse_cron(&self.price_sync.cron)?;
         if !(1..=100).contains(&self.failover.threshold_percent) {
             return Err("The failover threshold must be 1 to 100 percent.".into());
+        }
+        if !(1..=60).contains(&self.usage_poll.minutes) {
+            return Err("The usage poll interval must be 1 to 60 minutes.".into());
         }
         Ok(())
     }

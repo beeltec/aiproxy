@@ -55,6 +55,8 @@ pub struct AppState {
     pub model_sync: Arc<tokio::sync::Mutex<()>>,
     /// Wakes the price sync scheduler after a settings change.
     pub price_schedule_changed: Arc<Notify>,
+    /// Wakes the usage poll after a settings change.
+    pub usage_poll_changed: Arc<Notify>,
     pub recompute: Arc<Recompute>,
     /// Running gateway requests, so that shutdown can wait for their usage rows.
     pub gateway_tasks: TaskTracker,
@@ -97,6 +99,7 @@ impl AppState {
             price_sync: Arc::default(),
             model_sync: Arc::default(),
             price_schedule_changed: Arc::default(),
+            usage_poll_changed: Arc::default(),
             recompute: Arc::default(),
             gateway_tasks: TaskTracker::new(),
             stopping: CancellationToken::new(),
