@@ -182,8 +182,29 @@ function AccountCard({
 					params: { path: { id: account.id } },
 				}),
 			),
-		onSuccess: () => {
-			toast.success("The token, models and usage are refreshed.");
+		onSuccess: (updated) => {
+			// The endpoint ignores the errors of the model sync and the usage poll.
+			const usageAt = updated.quota_updated_at;
+			const usageFailed =
+				usageAt === null ||
+				usageAt === undefined ||
+				usageAt < updated.last_refresh_at;
+			const modelsFailed = Boolean(updated.models_last_error);
+			if (usageFailed && modelsFailed) {
+				toast.warning(
+					"The token is refreshed, but the models and the usage could not be refreshed.",
+				);
+			} else if (usageFailed) {
+				toast.warning(
+					"The token is refreshed, but the usage could not be refreshed.",
+				);
+			} else if (modelsFailed) {
+				toast.warning(
+					"The token is refreshed, but the models could not be refreshed.",
+				);
+			} else {
+				toast.success("The token, models and usage are refreshed.");
+			}
 			void refresh();
 			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
