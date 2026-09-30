@@ -550,24 +550,11 @@ export interface paths {
 		};
 		get?: never;
 		put?: never;
+		/**
+		 * Refreshes the token of the account. Then loads its model list and its usage. Only a failed
+		 *     token refresh fails the request.
+		 */
 		post: operations["refresh_now"];
-		delete?: never;
-		options?: never;
-		head?: never;
-		patch?: never;
-		trace?: never;
-	};
-	"/chatgpt/accounts/{id}/usage/refresh": {
-		parameters: {
-			query?: never;
-			header?: never;
-			path?: never;
-			cookie?: never;
-		};
-		get?: never;
-		put?: never;
-		/** Polls the usage of the account now. This works also when the usage poll is off. */
-		post: operations["refresh_usage"];
 		delete?: never;
 		options?: never;
 		head?: never;
@@ -2837,63 +2824,7 @@ export interface operations {
 					"application/json": components["schemas"]["AccountView"];
 				};
 			};
-			/** @description The refresh failed */
-			502: {
-				headers: {
-					[name: string]: unknown;
-				};
-				content: {
-					"application/json": components["schemas"]["ErrorBody"];
-				};
-			};
-		};
-	};
-	refresh_usage: {
-		parameters: {
-			query?: never;
-			header?: never;
-			path: {
-				id: number;
-			};
-			cookie?: never;
-		};
-		requestBody?: never;
-		responses: {
-			200: {
-				headers: {
-					[name: string]: unknown;
-				};
-				content: {
-					"application/json": components["schemas"]["AccountView"];
-				};
-			};
-			404: {
-				headers: {
-					[name: string]: unknown;
-				};
-				content: {
-					"application/json": components["schemas"]["ErrorBody"];
-				};
-			};
-			/** @description The account must be linked again, or its token must be refreshed */
-			409: {
-				headers: {
-					[name: string]: unknown;
-				};
-				content: {
-					"application/json": components["schemas"]["ErrorBody"];
-				};
-			};
-			/** @description The ChatGPT backend limits the requests now */
-			429: {
-				headers: {
-					[name: string]: unknown;
-				};
-				content: {
-					"application/json": components["schemas"]["ErrorBody"];
-				};
-			};
-			/** @description The usage poll failed */
+			/** @description The token refresh failed */
 			502: {
 				headers: {
 					[name: string]: unknown;

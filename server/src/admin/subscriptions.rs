@@ -14,8 +14,7 @@ use crate::chatgpt::link::{self, FlowState};
 use crate::chatgpt::models;
 use crate::chatgpt::refresh::{self, Failure, Trigger};
 use crate::chatgpt::scheduler::{self, AccountPlan};
-use crate::chatgpt::usage::{self, UsageError};
-use crate::db::now;
+use crate::chatgpt::usage;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::settings;
 use crate::state::AppState;
@@ -30,7 +29,6 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(set_failover_order))
         .routes(routes!(refresh_now))
         .routes(routes!(sync_models))
-        .routes(routes!(refresh_usage))
         .routes(routes!(start_device_link))
         .routes(routes!(start_pkce_link))
         .routes(routes!(link_status, cancel_link))
@@ -223,9 +221,11 @@ async fn set_failover_order(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Refreshes the token of the account. Then loads its model list and its usage. Only a failed
+/// token refresh fails the request.
 #[utoipa::path(post, path = "/chatgpt/accounts/{id}/refresh", tag = "subscriptions", responses(
     (status = OK, body = AccountView),
-    (status = BAD_GATEWAY, body = ErrorBody, description = "The refresh failed"),
+    (status = BAD_GATEWAY, body = ErrorBody, description = "The token refresh failed"),
 ))]
 async fn refresh_now(
     _: AdminSession,
@@ -234,7 +234,11 @@ async fn refresh_now(
 ) -> ApiResult<Json<AccountView>> {
     load_account(&state, id).await?;
     match refresh::refresh(&state, id, Trigger::Manual).await {
-        Ok(()) => Ok(Json(load_account(&state, id).await?)),
+        Ok(()) => {
+            // The model sync and the usage poll log their errors. The model sync also stores its error.
+            let _ = tokio::join!(models::sync_account(&state, id, true), usage::refresh(&state, id));
+            Ok(Json(load_account(&state, id).await?))
+        }
         Err(err @ (Failure::NeedsRelogin(_) | Failure::Temporary(_))) => Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "refresh_failed",
@@ -263,43 +267,6 @@ async fn sync_models(
             "model_sync_failed",
             format!("The model list sync failed: {err:#}"),
         )
-    })?;
-    Ok(Json(load_account(&state, id).await?))
-}
-
-/// Polls the usage of the account now. This works also when the usage poll is off.
-#[utoipa::path(post, path = "/chatgpt/accounts/{id}/usage/refresh", tag = "subscriptions", responses(
-    (status = OK, body = AccountView),
-    (status = NOT_FOUND, body = ErrorBody),
-    (status = CONFLICT, body = ErrorBody, description = "The account must be linked again, or its token must be refreshed"),
-    (status = TOO_MANY_REQUESTS, body = ErrorBody, description = "The ChatGPT backend limits the requests now"),
-    (status = BAD_GATEWAY, body = ErrorBody, description = "The usage poll failed"),
-))]
-async fn refresh_usage(
-    _: AdminSession,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<AccountView>> {
-    let account = load_account(&state, id).await?;
-    if account.status == "needs_relogin" {
-        return Err(ApiError::conflict("Link the account again before you load its usage."));
-    }
-    if account.access_expires_at.is_some_and(|at| at <= now()) {
-        return Err(ApiError::conflict(
-            "The access token has expired. Refresh the token first.",
-        ));
-    }
-    usage::refresh(&state, id).await.map_err(|err| match err {
-        UsageError::Throttled => ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "usage_refresh_throttled",
-            "The ChatGPT backend limits the requests now. Try again later.",
-        ),
-        UsageError::Failed(message) => ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "usage_refresh_failed",
-            format!("The usage refresh failed: {message}"),
-        ),
     })?;
     Ok(Json(load_account(&state, id).await?))
 }
