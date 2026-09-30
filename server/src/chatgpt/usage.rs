@@ -76,6 +76,7 @@ struct UsageResponse {
     rate_limit: Option<RateLimit>,
     credits: Option<Credits>,
     rate_limit_reached_type: Option<Value>,
+    spend_control: Option<SpendControl>,
 }
 
 #[derive(Deserialize)]
@@ -95,10 +96,41 @@ struct UsageWindow {
 }
 
 #[derive(Deserialize)]
+struct SpendControl {
+    reached: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct Credits {
     has_credits: Option<bool>,
     unlimited: Option<bool>,
     balance: Option<String>,
+}
+
+/// The values of `rate_limit_reached_type.type` that tell that a limit is reached.
+const REACHED_TYPES: [&str; 5] = [
+    "rate_limit_reached",
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached",
+];
+
+impl UsageResponse {
+    /// `None` without a `rate_limit_reached_type`. Else `true` only for a known type: an
+    /// unknown type does not tell if a limit is reached.
+    fn reached_type(&self) -> Option<bool> {
+        self.rate_limit_reached_type.as_ref().map(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| REACHED_TYPES.contains(&kind))
+        })
+    }
+
+    fn spend_reached(&self) -> bool {
+        self.spend_control.as_ref().and_then(|spend| spend.reached) == Some(true)
+    }
 }
 
 impl UsageWindow {
@@ -145,23 +177,25 @@ enum Block {
     Unknown,
 }
 
-fn block(usage: &UsageResponse, limits: &RateLimit, now: i64) -> Block {
-    let full = limits.windows().any(UsageWindow::full);
-    let reached = limits.allowed == Some(false)
-        || limits.limit_reached == Some(true)
-        || usage.rate_limit_reached_type.is_some()
-        || full;
+fn block(usage: &UsageResponse, now: i64) -> Block {
+    let limits = usage.rate_limit.as_ref();
+    let windows = || limits.into_iter().flat_map(RateLimit::windows);
+    let reached_type = usage.reached_type();
+    let reached = limits.is_some_and(|l| l.allowed == Some(false) || l.limit_reached == Some(true))
+        || reached_type == Some(true)
+        || usage.spend_reached()
+        || windows().any(UsageWindow::full);
     if reached {
-        let until = limits
-            .windows()
+        let until = windows()
             .filter(|w| w.full())
             .filter_map(|w| w.reset(now))
             .max()
-            .or_else(|| limits.windows().filter_map(|w| w.reset(now)).min())
+            .or_else(|| windows().filter_map(|w| w.reset(now)).min())
             .unwrap_or(now + 3600);
         return Block::Until(until);
     }
-    if limits.allowed == Some(true) && limits.limit_reached == Some(false) {
+    let below = limits.is_some_and(|l| l.allowed == Some(true) && l.limit_reached == Some(false));
+    if below && reached_type.is_none() {
         return Block::Clear;
     }
     Block::Unknown
@@ -354,11 +388,12 @@ async fn save(state: &AppState, account: i64, before: Revisions, usage: &UsageRe
         return Ok(());
     }
     let now = now();
-    let limits = usage.rate_limit.as_ref().filter(|_| quota_revision == before.2);
-    if let Some(limits) = limits {
-        select::write_quota(&mut *tx, account, &limits.quota(now), now).await?;
+    if quota_revision == before.2 {
+        if let Some(limits) = &usage.rate_limit {
+            select::write_quota(&mut *tx, account, &limits.quota(now), now).await?;
+        }
         if limited_revision == before.1 {
-            match block(usage, limits, now) {
+            match block(usage, now) {
                 Block::Until(until) => select::write_block(&mut *tx, account, Some(until)).await?,
                 Block::Clear => select::write_block(&mut *tx, account, None).await?,
                 Block::Unknown => {}
