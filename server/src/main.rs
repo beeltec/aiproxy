@@ -81,6 +81,7 @@ async fn serve() -> anyhow::Result<()> {
     chatgpt::codex_version::current(&state);
     state.prices.reload(&state.db).await?;
     tokio::spawn(prices::sync::run(state.clone()));
+    tokio::spawn(chatgpt::usage::run(state.clone()));
     let app = router(state.clone(), WebAssets::new());
     let listener = TcpListener::bind(bind)
         .await

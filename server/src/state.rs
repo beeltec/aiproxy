@@ -13,6 +13,7 @@ use crate::admin::Ceremonies;
 use crate::chatgpt::codex_version::CodexVersionCache;
 use crate::chatgpt::link::LinkFlows;
 use crate::chatgpt::refresh::Refresher;
+use crate::chatgpt::usage::UsagePolls;
 use crate::client_ip::TrustedProxies;
 use crate::config::Config;
 use crate::connections::catalog::CatalogCache;
@@ -55,6 +56,9 @@ pub struct AppState {
     pub model_sync: Arc<tokio::sync::Mutex<()>>,
     /// Wakes the price sync scheduler after a settings change.
     pub price_schedule_changed: Arc<Notify>,
+    /// Wakes the usage poll after a settings change.
+    pub usage_poll_changed: Arc<Notify>,
+    pub usage_polls: Arc<UsagePolls>,
     pub recompute: Arc<Recompute>,
     /// Running gateway requests, so that shutdown can wait for their usage rows.
     pub gateway_tasks: TaskTracker,
@@ -97,6 +101,8 @@ impl AppState {
             price_sync: Arc::default(),
             model_sync: Arc::default(),
             price_schedule_changed: Arc::default(),
+            usage_poll_changed: Arc::default(),
+            usage_polls: Arc::default(),
             recompute: Arc::default(),
             gateway_tasks: TaskTracker::new(),
             stopping: CancellationToken::new(),

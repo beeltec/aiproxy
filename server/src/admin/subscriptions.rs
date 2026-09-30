@@ -14,6 +14,7 @@ use crate::chatgpt::link::{self, FlowState};
 use crate::chatgpt::models;
 use crate::chatgpt::refresh::{self, Failure, Trigger};
 use crate::chatgpt::scheduler::{self, AccountPlan};
+use crate::chatgpt::usage;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::settings;
 use crate::state::AppState;
@@ -67,6 +68,10 @@ pub struct AccountView {
     secondary_window_minutes: Option<i64>,
     secondary_reset_at: Option<i64>,
     quota_updated_at: Option<i64>,
+    /// Credits of the account, from the last usage poll.
+    has_credits: Option<bool>,
+    credits_unlimited: Option<bool>,
+    credits_balance: Option<String>,
     /// Next scheduled refresh, computed from the plan.
     #[sqlx(default)]
     next_refresh_at: Option<i64>,
@@ -81,7 +86,7 @@ async fn load_accounts(state: &AppState, only: Option<i64>) -> ApiResult<Vec<Acc
              a.models_last_sync_at, a.models_last_error,
              a.limited_until, q.primary_used_percent, q.primary_window_minutes, q.primary_reset_at,
              q.secondary_used_percent, q.secondary_window_minutes, q.secondary_reset_at,
-             q.updated_at AS quota_updated_at
+             q.updated_at AS quota_updated_at, a.has_credits, a.credits_unlimited, a.credits_balance
          FROM chatgpt_accounts a LEFT JOIN chatgpt_quota q ON q.account_id = a.id
          WHERE ?1 IS NULL OR a.id = ?1
          ORDER BY a.is_primary DESC, a.failover_order, a.id",
@@ -216,18 +221,37 @@ async fn set_failover_order(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct RefreshOutcome {
+    account: AccountView,
+    /// The model list sync worked.
+    models_refreshed: bool,
+    /// The usage poll worked. A poll that the upstream cooldown stopped did not work.
+    usage_refreshed: bool,
+}
+
+/// Refreshes the token of the account. Then loads its model list and its usage. Only a failed
+/// token refresh fails the request.
 #[utoipa::path(post, path = "/chatgpt/accounts/{id}/refresh", tag = "subscriptions", responses(
-    (status = OK, body = AccountView),
-    (status = BAD_GATEWAY, body = ErrorBody, description = "The refresh failed"),
+    (status = OK, body = RefreshOutcome),
+    (status = BAD_GATEWAY, body = ErrorBody, description = "The token refresh failed"),
 ))]
 async fn refresh_now(
     _: AdminSession,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> ApiResult<Json<AccountView>> {
+) -> ApiResult<Json<RefreshOutcome>> {
     load_account(&state, id).await?;
     match refresh::refresh(&state, id, Trigger::Manual).await {
-        Ok(()) => Ok(Json(load_account(&state, id).await?)),
+        Ok(()) => {
+            // The model sync and the usage poll log their errors. The model sync also stores its error.
+            let (models, usage) = tokio::join!(models::sync_account(&state, id, true), usage::refresh(&state, id));
+            Ok(Json(RefreshOutcome {
+                account: load_account(&state, id).await?,
+                models_refreshed: models.is_ok(),
+                usage_refreshed: usage.is_ok(),
+            }))
+        }
         Err(err @ (Failure::NeedsRelogin(_) | Failure::Temporary(_))) => Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "refresh_failed",

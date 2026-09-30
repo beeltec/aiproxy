@@ -550,6 +550,10 @@ export interface paths {
 		};
 		get?: never;
 		put?: never;
+		/**
+		 * Refreshes the token of the account. Then loads its model list and its usage. Only a failed
+		 *     token refresh fails the request.
+		 */
 		post: operations["refresh_now"];
 		delete?: never;
 		options?: never;
@@ -912,10 +916,14 @@ export interface components {
 			access_expires_at?: number | null;
 			/** Format: int64 */
 			created_at: number;
+			credits_balance?: string | null;
+			credits_unlimited?: boolean | null;
 			email?: string | null;
 			failover_enabled: boolean;
 			/** Format: int64 */
 			failover_order: number;
+			/** @description Credits of the account, from the last usage poll. */
+			has_credits?: boolean | null;
 			/** Format: int64 */
 			id: number;
 			is_primary: boolean;
@@ -1414,6 +1422,13 @@ export interface components {
 		RecoveryCodes: {
 			recovery_codes: string[];
 		};
+		RefreshOutcome: {
+			account: components["schemas"]["AccountView"];
+			/** @description The model list sync worked. */
+			models_refreshed: boolean;
+			/** @description The usage poll worked. A poll that the upstream cooldown stopped did not work. */
+			usage_refreshed: boolean;
+		};
 		/** @description A scheduled job (token refresh, price sync). */
 		RefreshSchedule: {
 			/** @description 5-field cron: minute hour day-of-month month day-of-week. */
@@ -1452,6 +1467,11 @@ export interface components {
 			refresh: components["schemas"]["RefreshSchedule"];
 			/** @description IANA time zone, for example `Europe/Berlin`. Cron plans use it. */
 			time_zone: string;
+			/**
+			 * @description The regular poll of the ChatGPT account usage.
+			 *     Settings saved before the usage poll existed have none.
+			 */
+			usage_poll: components["schemas"]["UsagePoll"];
 		};
 		SetupRequest: {
 			password: string;
@@ -1601,6 +1621,14 @@ export interface components {
 		};
 		UpdateAdmin: {
 			disabled: boolean;
+		};
+		UsagePoll: {
+			enabled: boolean;
+			/**
+			 * Format: int32
+			 * @description Poll each account at this interval, 1 to 60 minutes. The poll is faster near the usage limit.
+			 */
+			minutes: number;
 		};
 	};
 	responses: never;
@@ -2800,10 +2828,10 @@ export interface operations {
 					[name: string]: unknown;
 				};
 				content: {
-					"application/json": components["schemas"]["AccountView"];
+					"application/json": components["schemas"]["RefreshOutcome"];
 				};
 			};
-			/** @description The refresh failed */
+			/** @description The token refresh failed */
 			502: {
 				headers: {
 					[name: string]: unknown;

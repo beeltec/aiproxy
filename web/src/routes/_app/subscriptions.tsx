@@ -182,31 +182,30 @@ function AccountCard({
 					params: { path: { id: account.id } },
 				}),
 			),
-		onSuccess: () => {
-			toast.success("The token is renewed.");
+		onSuccess: ({ models_refreshed, usage_refreshed }) => {
+			const usageFailed = !usage_refreshed;
+			const modelsFailed = !models_refreshed;
+			if (usageFailed && modelsFailed) {
+				toast.warning(
+					"The token is refreshed, but the models and the usage could not be refreshed.",
+				);
+			} else if (usageFailed) {
+				toast.warning(
+					"The token is refreshed, but the usage could not be refreshed.",
+				);
+			} else if (modelsFailed) {
+				toast.warning(
+					"The token is refreshed, but the models could not be refreshed.",
+				);
+			} else {
+				toast.success("The token, models and usage are refreshed.");
+			}
 			void refresh();
+			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
 		onError: (error) => {
 			toast.error(errorMessage(error));
 			void refresh();
-		},
-	});
-	const syncModels = useMutation({
-		mutationFn: () =>
-			call(
-				api.POST("/chatgpt/accounts/{id}/models/sync", {
-					params: { path: { id: account.id } },
-				}),
-			),
-		onSuccess: (updated) => {
-			toast.success(
-				`The models are refreshed. ${updated.models} models found.`,
-			);
-		},
-		onError: (error) => toast.error(errorMessage(error)),
-		onSettled: () => {
-			void refresh();
-			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
 	});
 	const makePrimary = useMutation({
@@ -319,7 +318,7 @@ function AccountCard({
 					</DropdownMenu>
 				</div>
 			</div>
-			<dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t px-4 py-3 text-sm sm:grid-cols-4">
+			<dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t px-4 py-3 text-sm sm:grid-cols-4 lg:grid-cols-5">
 				<Fact label="Last refresh">
 					<span title={formatDateTime(account.last_refresh_at)}>
 						{formatRelative(account.last_refresh_at)}
@@ -359,21 +358,20 @@ function AccountCard({
 								? formatRelative(account.models_last_sync_at)
 								: "not refreshed"}
 						</span>
-						<Button
-							size="icon-xs"
-							variant="ghost"
-							className="-my-1 shrink-0"
-							aria-label="Refresh models"
-							title="Refresh models"
-							disabled={broken || syncModels.isPending}
-							onClick={() => syncModels.mutate()}
-						>
-							<RefreshCwIcon
-								className={syncModels.isPending ? "animate-spin" : undefined}
-							/>
-						</Button>
 					</dd>
 				</div>
+				{account.credits_unlimited ? (
+					<Fact label="Credits">Unlimited</Fact>
+				) : (
+					account.has_credits &&
+					account.credits_balance && (
+						<Fact label="Credits">
+							<span className="font-mono tabular-nums">
+								{account.credits_balance}
+							</span>
+						</Fact>
+					)
+				)}
 			</dl>
 			<QuotaMeters account={account} threshold={failover ? threshold : null} />
 			{account.last_refresh_error && account.last_refresh_failed_at && (

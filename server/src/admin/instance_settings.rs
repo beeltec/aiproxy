@@ -1,4 +1,4 @@
-//! The Settings page: time zone, token refresh plan, failover, price sync plan.
+//! The Settings page: time zone, token refresh plan, failover, price sync plan, usage poll.
 
 use axum::Json;
 use axum::extract::State;
@@ -40,6 +40,7 @@ async fn put_settings(
     settings::save(&state.db, &req).await?;
     state.schedule_changed.notify_one();
     state.price_schedule_changed.notify_one();
+    state.usage_poll_changed.notify_one();
     Ok(Json(req))
 }
 

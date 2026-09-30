@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import type { Schemas } from "#/lib/api/client";
-import { formatRelative } from "#/lib/format";
+import { formatDateTime, formatRelative } from "#/lib/format";
 
 type Account = Schemas["AccountView"];
 
@@ -11,6 +12,15 @@ function windowName(minutes: number | null | undefined): string {
 	return `${minutes} min`;
 }
 
+/** Renders the component again at the interval, so that relative times stay current. */
+function useTick(ms: number) {
+	const [, setTick] = useState(0);
+	useEffect(() => {
+		const timer = setInterval(() => setTick((n) => n + 1), ms);
+		return () => clearInterval(timer);
+	}, [ms]);
+}
+
 /** The usage limits of the account, as meters. The tick shows the failover threshold. */
 export function QuotaMeters({
 	account,
@@ -19,6 +29,7 @@ export function QuotaMeters({
 	account: Account;
 	threshold: number | null;
 }) {
+	useTick(30_000);
 	const windows = [
 		{
 			used: account.primary_used_percent,
@@ -36,48 +47,59 @@ export function QuotaMeters({
 	if (windows.length === 0) {
 		return (
 			<p className="border-t px-4 py-2 text-xs text-muted-foreground">
-				Usage limits show up after the first request.
+				Usage limits show up after the next usage poll or request.
 			</p>
 		);
 	}
+	const updated = account.quota_updated_at;
 	return (
-		<div className="grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3 border-t px-4 py-3">
-			{windows.map((w) => {
-				const used = Math.min(100, Math.max(0, w.used ?? 0));
-				return (
-					<div key={`${w.minutes}`} className="space-y-1.5">
-						<div className="flex items-baseline justify-between gap-2">
-							<span className="eyebrow">{windowName(w.minutes)}</span>
-							<span className="font-mono text-xs tabular-nums">
-								{used.toFixed(0)}%
-								{w.reset && w.reset > Date.now() / 1000 && (
-									<span className="text-muted-foreground">
-										{" "}
-										· resets {formatRelative(w.reset)}
-									</span>
-								)}
-							</span>
-						</div>
-						<div
-							className="relative h-1.5 rounded-full bg-muted"
-							// The percentage is in the text above; the bar only shows it.
-							aria-hidden="true"
-						>
+		<div className="space-y-2 border-t px-4 py-3">
+			<div className="grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-3">
+				{windows.map((w) => {
+					const used = Math.min(100, Math.max(0, w.used ?? 0));
+					return (
+						<div key={`${w.minutes}`} className="space-y-1.5">
+							<div className="flex items-baseline justify-between gap-2">
+								<span className="eyebrow">{windowName(w.minutes)}</span>
+								<span className="font-mono text-xs tabular-nums">
+									{used.toFixed(0)}%
+									{w.reset && w.reset > Date.now() / 1000 && (
+										<span className="text-muted-foreground">
+											{" "}
+											· resets {formatRelative(w.reset)}
+										</span>
+									)}
+								</span>
+							</div>
 							<div
-								className="h-full rounded-full bg-meter"
-								style={{ width: `${used}%` }}
-							/>
-							{threshold !== null && (
+								className="relative h-1.5 rounded-full bg-muted"
+								// The percentage is in the text above; the bar only shows it.
+								aria-hidden="true"
+							>
 								<div
-									className="absolute -top-1 h-3.5 w-px bg-foreground/50"
-									style={{ left: `${threshold}%` }}
-									title={`Failover at ${threshold}%`}
+									className="h-full rounded-full bg-meter"
+									style={{ width: `${used}%` }}
 								/>
-							)}
+								{threshold !== null && (
+									<div
+										className="absolute -top-1 h-3.5 w-px bg-foreground/50"
+										style={{ left: `${threshold}%` }}
+										title={`Failover at ${threshold}%`}
+									/>
+								)}
+							</div>
 						</div>
-					</div>
-				);
-			})}
+					);
+				})}
+			</div>
+			{updated && (
+				<p
+					className="text-xs text-muted-foreground"
+					title={formatDateTime(updated)}
+				>
+					Updated {formatRelative(updated)}
+				</p>
+			)}
 		</div>
 	);
 }
