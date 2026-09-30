@@ -209,6 +209,17 @@ function AccountCard({
 			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
 	});
+	const refreshUsage = useMutation({
+		mutationFn: () =>
+			call(
+				api.POST("/chatgpt/accounts/{id}/usage/refresh", {
+					params: { path: { id: account.id } },
+				}),
+			),
+		onSuccess: () => toast.success("The usage is refreshed."),
+		onError: (error) => toast.error(errorMessage(error)),
+		onSettled: () => void refresh(),
+	});
 	const makePrimary = useMutation({
 		mutationFn: () =>
 			call(
@@ -319,7 +330,7 @@ function AccountCard({
 					</DropdownMenu>
 				</div>
 			</div>
-			<dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t px-4 py-3 text-sm sm:grid-cols-4">
+			<dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-t px-4 py-3 text-sm sm:grid-cols-4 lg:grid-cols-5">
 				<Fact label="Last refresh">
 					<span title={formatDateTime(account.last_refresh_at)}>
 						{formatRelative(account.last_refresh_at)}
@@ -374,8 +385,38 @@ function AccountCard({
 						</Button>
 					</dd>
 				</div>
+				{account.credits_unlimited ? (
+					<Fact label="Credits">Unlimited</Fact>
+				) : (
+					account.has_credits &&
+					account.credits_balance && (
+						<Fact label="Credits">
+							<span className="font-mono tabular-nums">
+								{account.credits_balance}
+							</span>
+						</Fact>
+					)
+				)}
 			</dl>
-			<QuotaMeters account={account} threshold={failover ? threshold : null} />
+			<QuotaMeters
+				account={account}
+				threshold={failover ? threshold : null}
+				action={
+					<Button
+						size="icon-xs"
+						variant="ghost"
+						className="-my-1 shrink-0"
+						aria-label="Refresh usage"
+						title="Refresh usage"
+						disabled={broken || refreshUsage.isPending}
+						onClick={() => refreshUsage.mutate()}
+					>
+						<RefreshCwIcon
+							className={refreshUsage.isPending ? "animate-spin" : undefined}
+						/>
+					</Button>
+				}
+			/>
 			{account.last_refresh_error && account.last_refresh_failed_at && (
 				<p className="border-t px-4 py-2 text-xs text-destructive">
 					Refresh failed {formatRelative(account.last_refresh_failed_at)}:{" "}

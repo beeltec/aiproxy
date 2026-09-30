@@ -158,6 +158,50 @@ function SettingsForm({ initial }: { initial: Schemas["Settings"] }) {
 				</FieldGroup>
 			</Section>
 			<Section
+				title="Usage polling"
+				description="The gateway reads the usage limits of each ChatGPT account from ChatGPT at this interval. When an account is near its limit, it reads them more often."
+			>
+				<FieldGroup>
+					<SwitchField
+						id="usage-poll-enabled"
+						label="Poll usage"
+						checked={value.usage_poll.enabled}
+						onChange={(enabled) =>
+							setValue({
+								...value,
+								usage_poll: { ...value.usage_poll, enabled },
+							})
+						}
+					/>
+					<Field className="max-w-48">
+						<FieldLabel htmlFor="usage-poll-minutes">
+							Interval (minutes)
+						</FieldLabel>
+						<Input
+							id="usage-poll-minutes"
+							type="number"
+							min={1}
+							max={60}
+							disabled={!value.usage_poll.enabled}
+							value={value.usage_poll.minutes}
+							onChange={(e) =>
+								setValue({
+									...value,
+									usage_poll: {
+										...value.usage_poll,
+										minutes: Number(e.target.value),
+									},
+								})
+							}
+						/>
+					</Field>
+					<p className="max-w-prose text-sm text-muted-foreground">
+						Requests also update the usage, even with polling off. You can
+						refresh the usage of one account on the Subscriptions page.
+					</p>
+				</FieldGroup>
+			</Section>
+			<Section
 				title="Failover"
 				description="When the primary ChatGPT account reaches its usage limit, requests go to the next checked account."
 			>
