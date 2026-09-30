@@ -11,6 +11,7 @@ use utoipa_axum::routes;
 
 use super::session::AdminSession;
 use crate::chatgpt::link::{self, FlowState};
+use crate::chatgpt::models;
 use crate::chatgpt::refresh::{self, Failure, Trigger};
 use crate::chatgpt::scheduler::{self, AccountPlan};
 use crate::error::{ApiError, ApiResult, ErrorBody};
@@ -26,6 +27,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(make_primary))
         .routes(routes!(set_failover_order))
         .routes(routes!(refresh_now))
+        .routes(routes!(sync_models))
         .routes(routes!(start_device_link))
         .routes(routes!(start_pkce_link))
         .routes(routes!(link_status, cancel_link))
@@ -52,6 +54,9 @@ pub struct AccountView {
     access_expires_at: Option<i64>,
     created_at: i64,
     models: i64,
+    /// Time of the last good model list sync.
+    models_last_sync_at: Option<i64>,
+    models_last_error: Option<String>,
     /// A usage-limit error blocks the account until this time.
     limited_until: Option<i64>,
     /// Usage limits from the last backend answer (usually a 5-hour and a weekly window).
@@ -73,6 +78,7 @@ async fn load_accounts(state: &AppState, only: Option<i64>) -> ApiResult<Vec<Acc
              a.refresh_mode, a.refresh_cron, a.last_refresh_at, a.last_refresh_error, a.last_refresh_failed_at,
              a.access_expires_at, a.created_at,
              (SELECT COUNT(*) FROM chatgpt_account_models m WHERE m.account_id = a.id) AS models,
+             a.models_last_sync_at, a.models_last_error,
              a.limited_until, q.primary_used_percent, q.primary_window_minutes, q.primary_reset_at,
              q.secondary_used_percent, q.secondary_window_minutes, q.secondary_reset_at,
              q.updated_at AS quota_updated_at
@@ -228,6 +234,30 @@ async fn refresh_now(
             format!("The refresh failed: {err}"),
         )),
     }
+}
+
+#[utoipa::path(post, path = "/chatgpt/accounts/{id}/models/sync", tag = "subscriptions", responses(
+    (status = OK, body = AccountView),
+    (status = NOT_FOUND, body = ErrorBody),
+    (status = CONFLICT, body = ErrorBody, description = "The account must be linked again"),
+    (status = BAD_GATEWAY, body = ErrorBody, description = "The model list sync failed"),
+))]
+async fn sync_models(
+    _: AdminSession,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<AccountView>> {
+    if load_account(&state, id).await?.status == "needs_relogin" {
+        return Err(ApiError::conflict("Link the account again before you load its models."));
+    }
+    models::sync_account(&state, id, true).await.map_err(|err| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "model_sync_failed",
+            format!("The model list sync failed: {err:#}"),
+        )
+    })?;
+    Ok(Json(load_account(&state, id).await?))
 }
 
 /// Removes the account. If it was the primary account, the next one in the order becomes primary.

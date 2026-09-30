@@ -8,7 +8,7 @@ use super::oauth::ORIGINATOR;
 
 pub const BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
-/// Adds the headers that every backend request needs. `client_version` is the Codex CLI version.
+/// Adds the headers that every backend request needs.
 pub fn with_headers(
     request: RequestBuilder,
     credentials: &Credentials,

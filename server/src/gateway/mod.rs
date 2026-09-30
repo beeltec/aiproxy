@@ -2,7 +2,7 @@
 
 mod auth;
 mod chat_api;
-mod codex;
+pub(crate) mod codex;
 mod engine;
 mod error;
 mod item_cache;

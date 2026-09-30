@@ -9,7 +9,6 @@ use serde::Deserialize;
 
 use crate::state::AppState;
 
-/// The version to use until a lookup succeeds.
 const FALLBACK: &str = "0.159.2";
 const URL: &str = "https://registry.npmjs.org/@openai/codex/latest";
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -20,9 +19,7 @@ const MAX_VERSION_LEN: usize = 32;
 
 #[derive(Clone)]
 struct Cached {
-    /// The last good version. `None` until a lookup succeeds.
     version: Option<String>,
-    /// When the last lookup ended.
     loaded_at: Instant,
     next_load: Instant,
 }
@@ -30,9 +27,7 @@ struct Cached {
 #[derive(Default)]
 pub struct CodexVersionCache {
     cached: Mutex<Option<Cached>>,
-    /// Only one lookup runs at a time.
     loading: tokio::sync::Mutex<()>,
-    /// Set while a background lookup from `current` runs.
     refreshing: AtomicBool,
 }
 
@@ -42,8 +37,7 @@ impl CodexVersionCache {
     }
 }
 
-/// The known version. It does not wait. When the cached value is too old, it starts one lookup
-/// in the background.
+/// Does not wait. When the cached value is old, it starts one lookup in the background.
 pub fn current(state: &AppState) -> String {
     let cache = &state.codex_version;
     let cached = cache.cached();
@@ -58,8 +52,7 @@ pub fn current(state: &AppState) -> String {
     version_of(cached.as_ref())
 }
 
-/// The version. It looks up npm when the cached value is too old, or always when `force` is set.
-/// When the lookup fails, the last good version (or the built-in one) is used.
+/// When the lookup fails, it gives the last good version or the built-in one.
 pub async fn get(state: &AppState, force: bool) -> String {
     let cache = &state.codex_version;
     let asked = Instant::now();

@@ -174,7 +174,7 @@ pub async fn send(state: &AppState, account: i64, body: &Value) -> Result<reqwes
 }
 
 /// Reads at most 1 MB of an error body, within 30 s.
-pub(super) async fn error_text(response: reqwest::Response) -> String {
+pub(crate) async fn error_text(response: reqwest::Response) -> String {
     const LIMIT: usize = 1024 * 1024;
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();

@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Each subscription card has a "Refresh models" button that loads the current model list from ChatGPT. The card shows the time of the last model sync and the last error. ([#28](https://github.com/beeltec/aiproxy/pull/28))
+- The price sync schedule is now "Price and model sync". It also refreshes the model lists of connections and active subscriptions. New ChatGPT models that upstream lists as visible are enabled automatically. Models that you turned on or off keep their state. ([#28](https://github.com/beeltec/aiproxy/pull/28))
+
 ### Fixed
 
 - aiproxy now sends the current Codex CLI version to the ChatGPT backend, in the `client_version` of the model list request and in the `User-Agent` of all backend requests. The backend hides models that need a newer client, so new models did not show. aiproxy reads the latest version from the npm registry at start and then again when it is older than a day. When npm is not available, it uses the last known version, else a built-in version (`0.159.2`). ([#26](https://github.com/beeltec/aiproxy/pull/26))

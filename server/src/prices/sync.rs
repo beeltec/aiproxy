@@ -119,7 +119,17 @@ pub async fn sync(state: &AppState) -> Result<(), sqlx::Error> {
             }
         }
     }
-    state.prices.reload(&state.db).await
+    state.prices.reload(&state.db).await?;
+
+    let accounts: Vec<i64> = sqlx::query_scalar("SELECT id FROM chatgpt_accounts WHERE status = 'active' ORDER BY id")
+        .fetch_all(&state.db)
+        .await?;
+    for account in accounts {
+        if let Err(err) = crate::chatgpt::models::sync_account(state, account, false).await {
+            tracing::warn!(account, error = %err, "cannot load the ChatGPT model list");
+        }
+    }
+    Ok(())
 }
 
 /// `entries` is the count of saved prices; a list that failed (`None`) keeps its last count.

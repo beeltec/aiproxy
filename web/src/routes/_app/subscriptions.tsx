@@ -67,6 +67,7 @@ import {
 	type Schemas,
 } from "#/lib/api/client";
 import { formatDateTime, formatRelative } from "#/lib/format";
+import { modelsQuery } from "#/lib/models";
 import { settingsQuery } from "#/lib/settings";
 
 type Account = Schemas["AccountView"];
@@ -188,6 +189,24 @@ function AccountCard({
 		onError: (error) => {
 			toast.error(errorMessage(error));
 			void refresh();
+		},
+	});
+	const syncModels = useMutation({
+		mutationFn: () =>
+			call(
+				api.POST("/chatgpt/accounts/{id}/models/sync", {
+					params: { path: { id: account.id } },
+				}),
+			),
+		onSuccess: (updated) => {
+			toast.success(
+				`The models are refreshed. ${updated.models} models found.`,
+			);
+		},
+		onError: (error) => toast.error(errorMessage(error)),
+		onSettled: () => {
+			void refresh();
+			void queryClient.invalidateQueries({ queryKey: modelsQuery.queryKey });
 		},
 	});
 	const makePrimary = useMutation({
@@ -324,13 +343,48 @@ function AccountCard({
 						"Global plan"
 					)}
 				</Fact>
-				<Fact label="Models">{account.models}</Fact>
+				<div className="min-w-0 space-y-0.5">
+					<dt className="eyebrow">Models</dt>
+					<dd className="flex min-w-0 items-center gap-1.5">
+						<span className="font-mono tabular-nums">{account.models}</span>
+						<span
+							className="truncate text-muted-foreground"
+							title={
+								account.models_last_sync_at
+									? `Refreshed ${formatDateTime(account.models_last_sync_at)}`
+									: undefined
+							}
+						>
+							{account.models_last_sync_at
+								? formatRelative(account.models_last_sync_at)
+								: "not refreshed"}
+						</span>
+						<Button
+							size="icon-xs"
+							variant="ghost"
+							className="-my-1 shrink-0"
+							aria-label="Refresh models"
+							title="Refresh models"
+							disabled={broken || syncModels.isPending}
+							onClick={() => syncModels.mutate()}
+						>
+							<RefreshCwIcon
+								className={syncModels.isPending ? "animate-spin" : undefined}
+							/>
+						</Button>
+					</dd>
+				</div>
 			</dl>
 			<QuotaMeters account={account} threshold={failover ? threshold : null} />
 			{account.last_refresh_error && account.last_refresh_failed_at && (
 				<p className="border-t px-4 py-2 text-xs text-destructive">
 					Refresh failed {formatRelative(account.last_refresh_failed_at)}:{" "}
 					{account.last_refresh_error}
+				</p>
+			)}
+			{account.models_last_error && (
+				<p className="border-t px-4 py-2 text-xs break-words text-destructive">
+					Model refresh failed: {account.models_last_error}
 				</p>
 			)}
 			{failover && !account.is_primary && (
