@@ -90,6 +90,10 @@ In the dashboard:
 2. **Connections**: add an API key of OpenAI, Anthropic or OpenRouter. Then enable the models that clients may use on the Models tab.
 3. **Aliases** (optional): give a model a short name with defaults. The page shows a ready Claude Code setup.
 
+Each subscription card has a **Refresh models** button. It loads the current model list from ChatGPT. It first looks up the newest Codex version, because ChatGPT hides models that need a newer client. The button is disabled for a subscription that needs a new login. The card shows when the model list was last synced and the last error.
+
+New ChatGPT models that ChatGPT lists as visible are enabled automatically. Models that you turned on or off keep their state. Models of a connection still start disabled.
+
 Model names are `chatgpt/<model>` or `<connection>/<model>`, for example `chatgpt/gpt-5.5` or `anthropic/claude-sonnet-5`. A bare name also works when only one enabled model has it.
 
 ### Connect a client
@@ -139,7 +143,7 @@ Stored server state (`previous_response_id`, conversations, file ids) is not sup
 
 The **Overview** and **Usage** pages show requests, tokens and their cost at API prices, per model, API key or upstream. They use your browser's time zone.
 
-aiproxy loads the prices daily (Settings page, default 04:00) and on the **Pricing** page on demand. An override there sets the prices of one model. "Recompute" gives stored requests the current prices. A cost is marked incomplete when the usage is an estimate or a price is missing.
+aiproxy loads the prices daily (Settings page, "Price and model sync", default 04:00) and on the **Pricing** page on demand. The same schedule also refreshes the model lists of connections and active subscriptions. An override there sets the prices of one model. "Recompute" gives stored requests the current prices. A cost is marked incomplete when the usage is an estimate or a price is missing.
 
 ## Configuration
 
