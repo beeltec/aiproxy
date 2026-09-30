@@ -77,8 +77,8 @@ async fn serve() -> anyhow::Result<()> {
     let rejected_db = state.db.clone();
     tokio::spawn(async move { rejected.run(rejected_db).await });
     tokio::spawn(chatgpt::scheduler::run(state.clone()));
-    let warm_up = state.clone();
-    tokio::spawn(async move { chatgpt::codex_version::get(&warm_up, false).await });
+    // Start the first Codex version lookup now, before the first backend request.
+    chatgpt::codex_version::current(&state);
     state.prices.reload(&state.db).await?;
     tokio::spawn(prices::sync::run(state.clone()));
     let app = router(state.clone(), WebAssets::new());

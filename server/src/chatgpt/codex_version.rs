@@ -2,6 +2,7 @@
 //! that need a newer client, so the version follows the latest release on npm.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -31,6 +32,8 @@ pub struct CodexVersionCache {
     cached: Mutex<Option<Cached>>,
     /// Only one lookup runs at a time.
     loading: tokio::sync::Mutex<()>,
+    /// Set while a background lookup from `current` runs.
+    refreshing: AtomicBool,
 }
 
 impl CodexVersionCache {
@@ -39,9 +42,20 @@ impl CodexVersionCache {
     }
 }
 
-/// The known version, without a lookup.
+/// The known version. It does not wait. When the cached value is too old, it starts one lookup
+/// in the background.
 pub fn current(state: &AppState) -> String {
-    version_of(state.codex_version.cached().as_ref())
+    let cache = &state.codex_version;
+    let cached = cache.cached();
+    let due = cached.as_ref().is_none_or(|c| Instant::now() >= c.next_load);
+    if due && !cache.refreshing.swap(true, Ordering::AcqRel) {
+        let state = state.clone();
+        tokio::spawn(async move {
+            get(&state, false).await;
+            state.codex_version.refreshing.store(false, Ordering::Release);
+        });
+    }
+    version_of(cached.as_ref())
 }
 
 /// The version. It looks up npm when the cached value is too old, or always when `force` is set.
