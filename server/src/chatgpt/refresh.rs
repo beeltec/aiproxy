@@ -13,8 +13,11 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use super::accounts::aad;
 use super::oauth::{self, RefreshError};
 use crate::db::now;
+use crate::gateway::codex::SendError;
 use crate::state::AppState;
 
+/// Refresh the access token when it expires within this time.
+const REFRESH_MARGIN: i64 = 5 * 60;
 /// A refresh younger than this counts as fresh, so waiting callers do not refresh again.
 const FRESH_SECS: i64 = 30;
 /// After a failed refresh, request-time callers do not start a new one for this long.
@@ -108,6 +111,40 @@ pub async fn refresh(state: &AppState, account: i64, trigger: Trigger) -> Result
     })
     .await
     .unwrap_or_else(|_| Err(Failure::Temporary("the refresh task stopped".into())))
+}
+
+pub enum SendFailure {
+    Renew(Failure),
+    Send(SendError),
+}
+
+/// Renews the token when it expires soon, and once more on `SendError::Unauthorized`. `send` must
+/// read the credentials on each call.
+pub async fn send_with_fresh_token<T, F>(state: &AppState, account: i64, send: impl Fn() -> F) -> Result<T, SendFailure>
+where
+    F: Future<Output = Result<T, SendError>>,
+{
+    let expires: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT access_expires_at FROM chatgpt_accounts WHERE id = ?")
+            .bind(account)
+            .fetch_optional(&state.db)
+            .await
+            .ok();
+    let expires_soon = expires.flatten().is_none_or(|at| at - now() < REFRESH_MARGIN);
+    if expires_soon {
+        refresh(state, account, Trigger::Request)
+            .await
+            .map_err(SendFailure::Renew)?;
+    }
+    match send().await {
+        Err(SendError::Unauthorized) => {
+            if refresh(state, account, Trigger::Request).await.is_err() {
+                return Err(SendFailure::Send(SendError::Unauthorized));
+            }
+            send().await.map_err(SendFailure::Send)
+        }
+        other => other.map_err(SendFailure::Send),
+    }
 }
 
 impl Refresher {

@@ -12,7 +12,7 @@ use super::auth::{Admission, ApiKey};
 use super::codex::{self, SendError};
 use super::provider;
 use super::routing::{Route, Upstream};
-use crate::chatgpt::refresh::{self, Trigger};
+use crate::chatgpt::refresh::{self, SendFailure, Trigger};
 use crate::chatgpt::select::{self, Selection};
 use crate::crypto::random_token;
 use crate::db::now;
@@ -33,8 +33,6 @@ pub(super) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 /// Longest wait to give a late error to a client that does not read.
 const ERROR_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-/// Refresh the access token when it expires within this time.
-const REFRESH_MARGIN: i64 = 5 * 60;
 
 /// One Responses stream event.
 #[derive(Clone, Debug)]
@@ -261,21 +259,22 @@ async fn attempts(
     'accounts: for account in accounts {
         outcome.attempts += 1;
         outcome.account = Some(account);
-        if !fresh_token(state, account).await {
-            last_failure = Some(Failure::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "account_unavailable",
-                "The token of the ChatGPT account cannot be renewed now.",
-            ));
-            continue;
-        }
         // A token error in the stream renews the token and sends the request to the same
         // account once more.
         let mut renewed = false;
         loop {
-            let response = match send_with_refresh(state, account, body).await {
+            let sent = refresh::send_with_fresh_token(state, account, || codex::send(state, account, body));
+            let response = match sent.await {
                 Ok(response) => response,
-                Err(error) => match failure_of(state, account, error).await {
+                Err(SendFailure::Renew(_)) => {
+                    last_failure = Some(Failure::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "account_unavailable",
+                        "The token of the ChatGPT account cannot be renewed now.",
+                    ));
+                    continue 'accounts;
+                }
+                Err(SendFailure::Send(error)) => match failure_of(state, account, error).await {
                     Next::Account(failure) => {
                         last_failure = Some(failure);
                         continue 'accounts;
@@ -353,31 +352,6 @@ fn unauthorized() -> Failure {
         "account_unauthorized",
         "The ChatGPT account did not accept its token. Link it again.",
     )
-}
-
-/// Renews the access token when it expires soon. False when that failed.
-async fn fresh_token(state: &AppState, account: i64) -> bool {
-    let expires: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT access_expires_at FROM chatgpt_accounts WHERE id = ?")
-            .bind(account)
-            .fetch_optional(&state.db)
-            .await
-            .ok();
-    let expires_soon = expires.flatten().is_none_or(|at| at - now() < REFRESH_MARGIN);
-    !expires_soon || refresh::refresh(state, account, Trigger::Request).await.is_ok()
-}
-
-/// On a 401, the token is renewed once and the request sent again.
-async fn send_with_refresh(state: &AppState, account: i64, body: &Value) -> Result<reqwest::Response, SendError> {
-    match codex::send(state, account, body).await {
-        Err(SendError::Unauthorized) => {
-            if refresh::refresh(state, account, Trigger::Request).await.is_err() {
-                return Err(SendError::Unauthorized);
-            }
-            codex::send(state, account, body).await
-        }
-        other => other,
-    }
 }
 
 enum StreamEnd {

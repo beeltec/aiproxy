@@ -2,11 +2,14 @@
 
 use std::time::Duration;
 
+use anyhow::bail;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::refresh::{self, SendFailure};
 use super::{accounts, backend, codex_version};
 use crate::db::now;
+use crate::gateway::codex::{self, SendError};
 use crate::state::AppState;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,23 +40,22 @@ struct ModelInfo {
 /// Loads the model list of an account and stores which models it can use. New models are
 /// enabled only when this is the first ChatGPT model list; later ones wait for the admin.
 pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usize> {
-    let credentials = accounts::credentials(state, account).await?;
     let installation_id = backend::installation_id(&state.db).await?;
     let client_version = codex_version::get(state, false).await;
-    let request = state
-        .http
-        .get(format!("{}/models", backend::BASE_URL))
-        .query(&[("client_version", &client_version)])
-        .header("Accept", "application/json")
-        .timeout(TIMEOUT);
-    let response = backend::with_headers(request, &credentials, &installation_id, &client_version)
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        let body: String = response.text().await.unwrap_or_default().chars().take(300).collect();
-        anyhow::bail!("the model list request failed with {status}: {body}");
-    }
+    let sent = refresh::send_with_fresh_token(state, account, || {
+        request(state, account, &installation_id, &client_version)
+    });
+    let response = match sent.await {
+        Ok(response) => response,
+        Err(SendFailure::Renew(failure)) => bail!("the token cannot be renewed: {failure}"),
+        Err(SendFailure::Send(SendError::Unauthorized)) => bail!("the ChatGPT backend did not accept the token"),
+        Err(SendFailure::Send(SendError::UsageLimit { message, .. } | SendError::Throttled { message, .. })) => {
+            bail!("the model list request failed: {message}")
+        }
+        Err(SendFailure::Send(SendError::Failed { status, message })) => {
+            bail!("the model list request failed with {status}: {message}")
+        }
+    };
     let list: ModelsResponse = response.json().await?;
 
     let now = now();
@@ -111,4 +113,38 @@ pub async fn sync_account(state: &AppState, account: i64) -> anyhow::Result<usiz
     tx.commit().await?;
     tracing::info!(account, models = list.models.len(), "ChatGPT model list loaded");
     Ok(list.models.len())
+}
+
+/// One model list request with the current credentials.
+async fn request(
+    state: &AppState,
+    account: i64,
+    installation_id: &str,
+    client_version: &str,
+) -> Result<reqwest::Response, SendError> {
+    let credentials = accounts::credentials(state, account)
+        .await
+        .map_err(|err| SendError::Failed {
+            status: 500,
+            message: format!("cannot read the account tokens: {err}"),
+        })?;
+    let request = state
+        .http
+        .get(format!("{}/models", backend::BASE_URL))
+        .query(&[("client_version", client_version)])
+        .header("Accept", "application/json")
+        .timeout(TIMEOUT);
+    let response = backend::with_headers(request, &credentials, installation_id, client_version)
+        .send()
+        .await
+        .map_err(|err| SendError::Failed {
+            status: 502,
+            message: format!("cannot reach the ChatGPT backend: {err}"),
+        })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let text = codex::error_text(response).await;
+    Err(codex::classify(status.as_u16(), &text, None))
 }
