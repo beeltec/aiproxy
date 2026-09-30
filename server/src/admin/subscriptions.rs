@@ -14,6 +14,8 @@ use crate::chatgpt::link::{self, FlowState};
 use crate::chatgpt::models;
 use crate::chatgpt::refresh::{self, Failure, Trigger};
 use crate::chatgpt::scheduler::{self, AccountPlan};
+use crate::chatgpt::usage::{self, UsageError};
+use crate::db::now;
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::settings;
 use crate::state::AppState;
@@ -28,6 +30,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(set_failover_order))
         .routes(routes!(refresh_now))
         .routes(routes!(sync_models))
+        .routes(routes!(refresh_usage))
         .routes(routes!(start_device_link))
         .routes(routes!(start_pkce_link))
         .routes(routes!(link_status, cancel_link))
@@ -67,6 +70,10 @@ pub struct AccountView {
     secondary_window_minutes: Option<i64>,
     secondary_reset_at: Option<i64>,
     quota_updated_at: Option<i64>,
+    /// Credits of the account, from the last usage poll.
+    has_credits: Option<bool>,
+    credits_unlimited: Option<bool>,
+    credits_balance: Option<String>,
     /// Next scheduled refresh, computed from the plan.
     #[sqlx(default)]
     next_refresh_at: Option<i64>,
@@ -81,7 +88,7 @@ async fn load_accounts(state: &AppState, only: Option<i64>) -> ApiResult<Vec<Acc
              a.models_last_sync_at, a.models_last_error,
              a.limited_until, q.primary_used_percent, q.primary_window_minutes, q.primary_reset_at,
              q.secondary_used_percent, q.secondary_window_minutes, q.secondary_reset_at,
-             q.updated_at AS quota_updated_at
+             q.updated_at AS quota_updated_at, a.has_credits, a.credits_unlimited, a.credits_balance
          FROM chatgpt_accounts a LEFT JOIN chatgpt_quota q ON q.account_id = a.id
          WHERE ?1 IS NULL OR a.id = ?1
          ORDER BY a.is_primary DESC, a.failover_order, a.id",
@@ -256,6 +263,43 @@ async fn sync_models(
             "model_sync_failed",
             format!("The model list sync failed: {err:#}"),
         )
+    })?;
+    Ok(Json(load_account(&state, id).await?))
+}
+
+/// Polls the usage of the account now. This works also when the usage poll is off.
+#[utoipa::path(post, path = "/chatgpt/accounts/{id}/usage/refresh", tag = "subscriptions", responses(
+    (status = OK, body = AccountView),
+    (status = NOT_FOUND, body = ErrorBody),
+    (status = CONFLICT, body = ErrorBody, description = "The account must be linked again, or its token must be refreshed"),
+    (status = TOO_MANY_REQUESTS, body = ErrorBody, description = "The ChatGPT backend limits the requests now"),
+    (status = BAD_GATEWAY, body = ErrorBody, description = "The usage poll failed"),
+))]
+async fn refresh_usage(
+    _: AdminSession,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<AccountView>> {
+    let account = load_account(&state, id).await?;
+    if account.status == "needs_relogin" {
+        return Err(ApiError::conflict("Link the account again before you load its usage."));
+    }
+    if account.access_expires_at.is_some_and(|at| at <= now()) {
+        return Err(ApiError::conflict(
+            "The access token has expired. Refresh the token first.",
+        ));
+    }
+    usage::refresh(&state, id).await.map_err(|err| match err {
+        UsageError::Throttled => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "usage_refresh_throttled",
+            "The ChatGPT backend limits the requests now. Try again later.",
+        ),
+        UsageError::Failed(message) => ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "usage_refresh_failed",
+            format!("The usage refresh failed: {message}"),
+        ),
     })?;
     Ok(Json(load_account(&state, id).await?))
 }

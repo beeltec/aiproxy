@@ -557,6 +557,23 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	"/chatgpt/accounts/{id}/usage/refresh": {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/** Polls the usage of the account now. This works also when the usage poll is off. */
+		post: operations["refresh_usage"];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	"/chatgpt/failover-order": {
 		parameters: {
 			query?: never;
@@ -912,10 +929,14 @@ export interface components {
 			access_expires_at?: number | null;
 			/** Format: int64 */
 			created_at: number;
+			credits_balance?: string | null;
+			credits_unlimited?: boolean | null;
 			email?: string | null;
 			failover_enabled: boolean;
 			/** Format: int64 */
 			failover_order: number;
+			/** @description Credits of the account, from the last usage poll. */
+			has_credits?: boolean | null;
 			/** Format: int64 */
 			id: number;
 			is_primary: boolean;
@@ -1452,6 +1473,11 @@ export interface components {
 			refresh: components["schemas"]["RefreshSchedule"];
 			/** @description IANA time zone, for example `Europe/Berlin`. Cron plans use it. */
 			time_zone: string;
+			/**
+			 * @description The regular poll of the ChatGPT account usage.
+			 *     Settings saved before the usage poll existed have none.
+			 */
+			usage_poll: components["schemas"]["UsagePoll"];
 		};
 		SetupRequest: {
 			password: string;
@@ -1601,6 +1627,14 @@ export interface components {
 		};
 		UpdateAdmin: {
 			disabled: boolean;
+		};
+		UsagePoll: {
+			enabled: boolean;
+			/**
+			 * Format: int32
+			 * @description Poll each account at this interval, 1 to 60 minutes. The poll is faster near the usage limit.
+			 */
+			minutes: number;
 		};
 	};
 	responses: never;
@@ -2804,6 +2838,62 @@ export interface operations {
 				};
 			};
 			/** @description The refresh failed */
+			502: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+		};
+	};
+	refresh_usage: {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				id: number;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["AccountView"];
+				};
+			};
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			/** @description The account must be linked again, or its token must be refreshed */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			/** @description The ChatGPT backend limits the requests now */
+			429: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					"application/json": components["schemas"]["ErrorBody"];
+				};
+			};
+			/** @description The usage poll failed */
 			502: {
 				headers: {
 					[name: string]: unknown;
