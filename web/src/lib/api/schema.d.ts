@@ -1229,6 +1229,8 @@ export interface components {
 			/** @description `chatgpt/<model>` or `<connection slug>/<model>`. */
 			model: string;
 			price?: components["schemas"]["PriceView"] | null;
+			/** @description Empty for model prices; `decisions` for the Decisions endpoint. */
+			route?: string | null;
 		};
 		ModelUpdate: {
 			/** @description Capabilities to change. An empty object removes all changes. */
@@ -1330,7 +1332,7 @@ export interface components {
 			/** @description The override match key or the model key in the list. */
 			key: string;
 			prices: components["schemas"]["Prices"];
-			/** @description `override`, `openrouter`, `litellm` or `models_dev`. */
+			/** @description `override`, `openai`, `openrouter`, `litellm` or `models_dev`. */
 			source: string;
 			/** Format: int64 */
 			version: number;

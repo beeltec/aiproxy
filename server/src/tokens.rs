@@ -75,6 +75,9 @@ fn collect(value: &Value, in_list: bool, text: &mut String, images: &mut usize) 
             text.push_str(s);
             text.push(' ');
         }
+        Value::Bool(value) => {
+            text.push_str(if *value { "true " } else { "false " });
+        }
         Value::Number(n) => {
             text.push_str(&n.to_string());
             text.push(' ');

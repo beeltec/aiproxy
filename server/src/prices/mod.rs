@@ -234,6 +234,7 @@ pub const CATEGORIES: [&str; 17] = [
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
 pub struct CostInput {
     pub component: String,
+    pub route: String,
     pub upstream: String,
     pub resolved_model: Option<String>,
     pub usage_status: String,
@@ -263,7 +264,7 @@ pub struct CostInput {
 }
 
 /// The columns of `CostInput`, for queries.
-pub const COST_INPUT_COLUMNS: &str = "component, upstream, resolved_model, usage_status, usage_exact,
+pub const COST_INPUT_COLUMNS: &str = "component, route, upstream, resolved_model, usage_status, usage_exact,
     service_tier_reported, speed, inference_geo, input_text, input_text_cached, input_audio,
     input_audio_cached, input_image, input_image_cached, cache_write_5m, cache_write_1h, output_text,
     output_reasoning, output_audio, output_image, web_search_calls, web_search_preview_calls,
@@ -448,13 +449,45 @@ impl PriceBook {
         None
     }
 
+    pub fn resolve_route(&self, client_model: Option<&str>, kind: &str, model: &str, route: &str) -> Option<Resolved> {
+        if route != "decisions" {
+            return self.resolve(client_model, kind, model);
+        }
+        if kind != "openai" || model != "gpt-6-luna" {
+            return None;
+        }
+        let provider_key = format!("{kind}/{model}@decisions");
+        for key in client_model
+            .map(|name| format!("{name}@decisions"))
+            .into_iter()
+            .chain(std::iter::once(provider_key.clone()))
+        {
+            if let Some((version, prices)) = self.overrides.get(&key) {
+                return Some(Resolved {
+                    version: *version,
+                    source: "override".to_owned(),
+                    key,
+                    prices: prices.clone(),
+                });
+            }
+        }
+        self.versions
+            .get(&("openai".to_owned(), provider_key.clone()))
+            .map(|(version, prices)| Resolved {
+                version: *version,
+                source: "openai".to_owned(),
+                key: provider_key,
+                prices: prices.clone(),
+            })
+    }
+
     /// The price of a usage row, with its cost.
     pub fn cost(&self, input: &CostInput) -> Cost {
         let resolved = input.priced_model().and_then(|(kind, model)| {
             let client = (input.component != "image_tool")
                 .then_some(input.resolved_model.as_deref())
                 .flatten();
-            self.resolve(client, kind, model)
+            self.resolve_route(client, kind, model, &input.route)
         });
         // These models bill a fixed block of search tokens per call, which no list describes.
         let fixed_search_tokens = input.web_search_calls > 0
@@ -506,6 +539,9 @@ pub fn cost(input: &CostInput, prices: &Prices) -> Cost {
         return Cost::default();
     }
     let mut complete = input.usage_status != "estimated" && input.usage_exact && !prices.partial;
+    if input.route == "decisions" && !matches!(input.inference_geo.as_deref(), Some("global" | "us" | "eu")) {
+        complete = false;
+    }
     let mut parts = BTreeMap::new();
     let tokens = input.tokens();
 

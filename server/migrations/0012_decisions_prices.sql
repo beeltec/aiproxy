@@ -1,0 +1,2 @@
+INSERT INTO price_versions (source, model_key, prices, created_at, current)
+VALUES ('openai', 'openai/gpt-6-luna@decisions', '{"standard":{"input_text":1e-07,"input_image":1e-07,"input_audio":0,"input_text_cached":0,"input_image_cached":0,"input_audio_cached":0,"cache_write_5m":0,"cache_write_1h":0,"output_text":0,"output_reasoning":0,"output_image":0,"output_audio":0},"context_tiers":[{"above":272000,"standard":{"input_text":2e-07,"input_image":2e-07}}],"geo":{"us":1.1,"eu":1.1}}', unixepoch(), 1);

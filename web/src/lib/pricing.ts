@@ -24,6 +24,7 @@ export const recomputeQuery = queryOptions({
 });
 
 export const SOURCE_NAMES: Record<string, string> = {
+	openai: "OpenAI",
 	litellm: "LiteLLM",
 	models_dev: "models.dev",
 	openrouter: "OpenRouter",

@@ -1,4 +1,4 @@
-//! Embeddings, audio and images. These go natively to OpenAI or OpenRouter connections; images
+//! Decisions, embeddings, audio and images. These go natively to OpenAI or OpenRouter connections; images
 //! for ChatGPT models run through the Responses image-generation tool. Each call runs in its own
 //! task, so a client that leaves does not lose the usage row.
 
@@ -526,6 +526,99 @@ fn json_body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Failure>
         Ok(_) => Err(bad("The body must be a JSON object.")),
         Err(rejection) => Err(request::bad_json(&rejection)),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Decisions
+
+pub async fn decisions(
+    State(state): State<AppState>,
+    Extension(key): Extension<ApiKey>,
+    Extension(admission): Extension<Admission>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let result = async {
+        let mut body = json_body(body)?;
+        let (route, connection_id, kind) = target(&state, &key, &body["model"], &[Kind::OpenAi], "Decisions").await?;
+        if route.upstream_model != "gpt-6-luna" {
+            return Err(Failure::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported_model",
+                "Decisions supports only gpt-6-luna on OpenAI API-key connections.",
+            ));
+        }
+        if body.get("stream").is_some() {
+            return Err(bad("Decisions does not support the `stream` field."));
+        }
+        body["model"] = json!(route.upstream_model);
+        let estimate = crate::tokens::estimate(&body).await as i64;
+        let reserved = reserve(&state, &key, estimate)?;
+        let call = Call {
+            key: key.clone(),
+            route,
+            connection_id,
+            kind,
+            route_name: "decisions",
+            streamed: false,
+            reserved,
+            estimate: Tokens {
+                input_text: estimate,
+                ..Tokens::default()
+            },
+            media: Media::default(),
+            started: Instant::now(),
+            _permits: admission,
+        };
+        Ok::<_, Failure>((call, body))
+    }
+    .await;
+    let (call, body) = match result {
+        Ok(ok) => ok,
+        Err(failure) => return error(failure),
+    };
+    let task_state = state.clone();
+    let connection_id = call.connection_id;
+    detached(&state, call, async move {
+        let connection = match Connection::load(&task_state, connection_id).await {
+            Ok(connection) => connection,
+            Err(_) => {
+                return failed(Failure::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Cannot load the connection.",
+                ));
+            }
+        };
+        let request = match connection.request(&task_state, reqwest::Method::POST, "decisions", None) {
+            Ok(request) => request,
+            Err(err) => {
+                return failed(Failure::new(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_blocked",
+                    err.to_string(),
+                ));
+            }
+        };
+        let response = match send(request.json(&body), TOTAL_TIMEOUT).await {
+            Ok(response) => response,
+            Err(done) => return *done,
+        };
+        let answer = match read_json(response).await {
+            Ok(answer) => answer,
+            Err(failure) => return lost(failure),
+        };
+        let usage = &answer["usage"];
+        let mut recorded = if usage["input_tokens"].as_i64().is_some_and(|n| n >= 0)
+            && usage["output_tokens"].as_i64().is_some_and(|n| n >= 0)
+        {
+            Recorded::ok("reported", Tokens::from_openai(usage), Media::default())
+        } else {
+            Recorded::unknown()
+        };
+        recorded.extras.inference_geo = Some(connection.decisions_geo().to_owned());
+        (Json(answer).into_response(), Some(recorded))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------------------------
