@@ -6,9 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
 ### Added
 
-- Native `/v1/decisions` for OpenAI API-key connections using `gpt-6-luna`, with separate pricing, overrides, and cost recomputation. ([#32](https://github.com/beeltec/aiproxy/pull/32))
+- Native `/v1/decisions` for OpenAI API-key connections using `gpt-6-luna`. Supports predicates, choices, scores, multiple questions, boolean choices, and inline images. ([#32](https://github.com/beeltec/aiproxy/pull/32))
+- Separate Decisions pricing and overrides, including long-context rates, regional premiums, stored price versions, and cost recomputation. Unknown processing geography produces incomplete costs. ([#32](https://github.com/beeltec/aiproxy/pull/32))
+- A Decisions row on the Pricing page. Normal Luna prices and overrides remain independent. ([#32](https://github.com/beeltec/aiproxy/pull/32))
 
 ## [0.2.0] - 2026-09-30
 
@@ -44,7 +48,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Admin login with passwords, authenticator apps (TOTP), passkeys and recovery codes.
 - Docker image for `linux/amd64` and `linux/arm64`, signed with Sigstore, and a compose setup with Traefik.
 
-[Unreleased]: https://github.com/beeltec/aiproxy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/beeltec/aiproxy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/beeltec/aiproxy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/beeltec/aiproxy/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/beeltec/aiproxy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/beeltec/aiproxy/releases/tag/v0.1.0
