@@ -46,6 +46,8 @@ pub struct ModelPrice {
     model: String,
     /// `chatgpt`, `openai`, `anthropic` or `openrouter`.
     kind: String,
+    /// Empty for model prices; `decisions` for the Decisions endpoint.
+    route: Option<String>,
     /// Empty when no price is known: the cost of the model is unknown.
     price: Option<PriceView>,
 }
@@ -53,7 +55,7 @@ pub struct ModelPrice {
 #[derive(Serialize, ToSchema)]
 pub struct PriceView {
     version: i64,
-    /// `override`, `openrouter`, `litellm` or `models_dev`.
+    /// `override`, `openai`, `openrouter`, `litellm` or `models_dev`.
     source: String,
     /// The override match key or the model key in the list.
     key: String,
@@ -74,12 +76,18 @@ async fn model_prices(_: AdminSession, State(state): State<AppState>) -> ApiResu
     let book = state.prices.get();
     let out = models
         .into_iter()
-        .map(|(slug, kind, model)| {
+        .flat_map(|(slug, kind, model)| {
+            let decisions = kind == "openai" && model == "gpt-6-luna";
+            std::iter::once(None)
+                .chain(decisions.then_some(Some("decisions")))
+                .map(move |route| (slug.clone(), kind.clone(), model.clone(), route))
+        })
+        .map(|(slug, kind, model, route)| {
             let name = format!("{slug}/{model}");
             // ChatGPT models have OpenAI API prices.
             let priced_kind = if kind == "chatgpt" { "openai" } else { kind.as_str() };
             let price = book
-                .resolve(Some(&name), priced_kind, &model)
+                .resolve_route(Some(&name), priced_kind, &model, route.unwrap_or_default())
                 .map(|resolved| PriceView {
                     version: resolved.version,
                     source: resolved.source,
@@ -89,6 +97,7 @@ async fn model_prices(_: AdminSession, State(state): State<AppState>) -> ApiResu
             ModelPrice {
                 model: name,
                 kind,
+                route: route.map(str::to_owned),
                 price,
             }
         })

@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Native `/v1/decisions` for OpenAI API-key connections using `gpt-6-luna`, with separate pricing, overrides, and cost recomputation. ([#32](https://github.com/beeltec/aiproxy/pull/32))
+
 ## [0.2.0] - 2026-09-30
 
 ### Added

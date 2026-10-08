@@ -222,7 +222,7 @@ function ModelPrices() {
 		else
 			setEditing({
 				kind: "new",
-				matchKey: model.model,
+				matchKey: model.route ? `${model.model}@${model.route}` : model.model,
 				prices: model.price?.prices,
 			});
 	};
@@ -230,6 +230,7 @@ function ModelPrices() {
 		<section className="rounded-xl border bg-card">
 			<p className="border-b px-5 py-3 text-sm text-muted-foreground">
 				The prices that apply to each enabled model now, per 1M tokens.
+				Decisions has separate prices and overrides.
 			</p>
 			<Table>
 				<TableHeader>
@@ -249,9 +250,14 @@ function ModelPrices() {
 					{models.map((model) => {
 						const standard = model.price?.prices.standard;
 						return (
-							<TableRow key={model.model}>
+							<TableRow key={`${model.model}:${model.route ?? "model"}`}>
 								<TableCell className="max-w-72 truncate font-mono text-xs">
 									{model.model}
+									{model.route && (
+										<Badge variant="outline" className="ml-2">
+											Decisions
+										</Badge>
+									)}
 								</TableCell>
 								<TableCell>
 									{model.price ? (
@@ -287,7 +293,7 @@ function ModelPrices() {
 										variant="ghost"
 										size="sm"
 										onClick={() => edit(model)}
-										aria-label={`Set the price of ${model.model}`}
+										aria-label={`Set the price of ${model.model}${model.route ? " Decisions" : ""}`}
 									>
 										{model.price?.source === "override" ? "Edit" : "Override"}
 									</Button>

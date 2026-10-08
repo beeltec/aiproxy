@@ -398,6 +398,7 @@ async fn insert_all(db: &SqlitePool, prices: &PriceCache, rows: &[Row]) -> Resul
 fn cost_input(row: &Row) -> CostInput {
     let mut input = CostInput {
         component: row.component.to_owned(),
+        route: row.route.to_owned(),
         upstream: row.upstream.to_owned(),
         resolved_model: row.resolved_model.clone(),
         usage_status: row.usage_status.to_owned(),

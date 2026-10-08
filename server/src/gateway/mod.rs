@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/chat/completions", post(chat_api::create))
         .route("/messages", post(messages_api::create))
         .route("/messages/count_tokens", post(messages_api::count_tokens))
+        .route("/decisions", post(media::decisions))
         .route("/embeddings", post(media::embeddings))
         .route("/audio/speech", post(media::speech))
         .route("/audio/transcriptions", post(media::transcriptions))

@@ -131,9 +131,12 @@ curl https://ai.example.com/v1/responses \
 | Endpoint | Upstreams |
 |---|---|
 | `/v1/responses`, `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` | all |
+| `/v1/decisions` | OpenAI API-key connections, `gpt-6-luna` only |
 | `/v1/embeddings` | OpenAI, OpenRouter |
 | `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations` | OpenAI |
 | `/v1/images/generations`, `/v1/images/edits` | OpenAI, ChatGPT |
+
+Decisions forwards the native [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) payload and response. It supports predicates, choices, scores, and inline images. Use a qualified model such as `openai/gpt-6-luna`, or an alias targeting it. Enable the model on the connection first. ChatGPT subscriptions, Anthropic, OpenRouter, and other models are unsupported. There is no streaming or emulation through chat endpoints. Alias defaults for reasoning, summaries, and speed do not apply.
 
 Reasoning effort (`reasoning.effort`, `reasoning_effort`, `output_config.effort` or the Anthropic thinking budget) and fast mode (`service_tier: "fast"` or `"priority"`, Anthropic `speed: "fast"`) are mapped between the formats.
 
@@ -144,6 +147,10 @@ Stored server state (`previous_response_id`, conversations, file ids) is not sup
 The **Overview** and **Usage** pages show requests, tokens and their cost at API prices, per model, API key or upstream. They use your browser's time zone.
 
 aiproxy loads the prices daily (Settings page, "Price and model sync", default 04:00) and on the **Pricing** page on demand. The same schedule also refreshes the model lists of connections and active subscriptions. An override there sets the prices of one model. "Recompute" gives stored requests the current prices. A cost is marked incomplete when the usage is an estimate or a price is missing.
+
+Decisions uses separate, versioned OpenAI prices shipped with aiproxy: $0.10 per million input tokens, with no output, cache-read, or cache-write charges. Above 272,000 input tokens, the input price doubles. Official US and EU regional endpoints add 10%. A custom endpoint with unknown processing geography has an incomplete cost. Recompute uses the recorded route and geography, even if the connection later changes.
+
+The Pricing page lists a separate Decisions row. Its overrides use `<connection>/gpt-6-luna@decisions`, or `openai/gpt-6-luna@decisions` for all OpenAI connections. Normal Luna overrides do not apply. Overrides replace the full price version, including context tiers and geography multipliers; the form preserves those rules when copying a price. Use the admin API to change those advanced rules. Stored costs retain their price version until recomputed. Usage keeps the reported token categories; it does not guess an image/text split.
 
 ## Configuration
 

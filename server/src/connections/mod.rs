@@ -75,6 +75,22 @@ impl Connection {
         })
     }
 
+    pub fn decisions_geo(&self) -> &'static str {
+        if self.base_url.scheme() != "https"
+            || self.base_url.port_or_known_default() != Some(443)
+            || self.base_url.path().trim_end_matches('/') != "/v1"
+            || self.base_url.query().is_some()
+        {
+            return "unknown";
+        }
+        match self.base_url.host_str() {
+            Some("api.openai.com") => "global",
+            Some("us.api.openai.com") => "us",
+            Some("eu.api.openai.com") => "eu",
+            _ => "unknown",
+        }
+    }
+
     /// A request to `<base URL>/<path>` with the authentication headers of the provider. The
     /// base URL is checked again here, because a literal IP address does not reach the resolver.
     /// `anthropic_version` is the version header of an Anthropic client, if it sent one.
