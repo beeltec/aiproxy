@@ -40,6 +40,7 @@ struct Call {
     /// The usage known before the answer, for a row when the answer has none.
     estimate: Tokens,
     media: Media,
+    inference_geo: Option<&'static str>,
     started: Instant,
     _permits: Admission,
 }
@@ -147,6 +148,9 @@ async fn record(state: &AppState, call: &Call, mut recorded: Recorded) {
     if recorded.unknown {
         recorded.tokens = call.estimate.clone();
         recorded.media = call.media.clone();
+    }
+    if let Some(geo) = call.inference_geo {
+        recorded.extras.inference_geo = Some(geo.to_owned());
     }
     let used = match recorded.tokens.input() + recorded.tokens.output() {
         // Duration-priced audio reports no tokens; its length still counts for the limit.
@@ -551,6 +555,13 @@ pub async fn decisions(
             return Err(bad("Decisions does not support the `stream` field."));
         }
         body["model"] = json!(route.upstream_model);
+        let connection = Connection::load(&state, connection_id).await.map_err(|_| {
+            Failure::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Cannot load the connection.",
+            )
+        })?;
         let estimate = crate::tokens::estimate(&body).await as i64;
         let reserved = reserve(&state, &key, estimate)?;
         let call = Call {
@@ -566,29 +577,19 @@ pub async fn decisions(
                 ..Tokens::default()
             },
             media: Media::default(),
+            inference_geo: Some(connection.decisions_geo()),
             started: Instant::now(),
             _permits: admission,
         };
-        Ok::<_, Failure>((call, body))
+        Ok::<_, Failure>((call, body, connection))
     }
     .await;
-    let (call, body) = match result {
+    let (call, body, connection) = match result {
         Ok(ok) => ok,
         Err(failure) => return error(failure),
     };
     let task_state = state.clone();
-    let connection_id = call.connection_id;
     detached(&state, call, async move {
-        let connection = match Connection::load(&task_state, connection_id).await {
-            Ok(connection) => connection,
-            Err(_) => {
-                return failed(Failure::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "Cannot load the connection.",
-                ));
-            }
-        };
         let request = match connection.request(&task_state, reqwest::Method::POST, "decisions", None) {
             Ok(request) => request,
             Err(err) => {
@@ -608,14 +609,13 @@ pub async fn decisions(
             Err(failure) => return lost(failure),
         };
         let usage = &answer["usage"];
-        let mut recorded = if usage["input_tokens"].as_i64().is_some_and(|n| n >= 0)
+        let recorded = if usage["input_tokens"].as_i64().is_some_and(|n| n >= 0)
             && usage["output_tokens"].as_i64().is_some_and(|n| n >= 0)
         {
             Recorded::ok("reported", Tokens::from_openai(usage), Media::default())
         } else {
             Recorded::unknown()
         };
-        recorded.extras.inference_geo = Some(connection.decisions_geo().to_owned());
         (Json(answer).into_response(), Some(recorded))
     })
     .await
@@ -681,6 +681,7 @@ pub async fn embeddings(
                 ..Tokens::default()
             },
             media: Media::default(),
+            inference_geo: None,
             started: Instant::now(),
             _permits: admission,
         };
@@ -773,6 +774,7 @@ pub async fn speech(
                 characters,
                 ..Media::default()
             },
+            inference_geo: None,
             started: Instant::now(),
             _permits: admission,
         };
@@ -1071,6 +1073,7 @@ async fn audio_text(
                 seconds,
                 ..Media::default()
             },
+            inference_geo: None,
             started: Instant::now(),
             _permits: admission,
         };
@@ -1402,6 +1405,7 @@ pub async fn image_generations(
             image_quality: body["quality"].as_str().map(str::to_owned),
             ..Media::default()
         },
+        inference_geo: None,
         started: Instant::now(),
         _permits: admission,
     };
@@ -1512,6 +1516,7 @@ pub async fn image_edits(
                     input_images: parts.iter().filter(|p| is_image_part(p)).count() as i64,
                     ..Media::default()
                 },
+                inference_geo: None,
                 started: Instant::now(),
                 _permits: admission,
             };
